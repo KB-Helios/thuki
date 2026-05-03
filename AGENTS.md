@@ -23,8 +23,10 @@ bun run format           # Prettier + cargo fmt
 bun run format:check     # Dry-run format validation
 bun run typecheck        # tsc --noEmit
 
-bun run sandbox:start    # Docker Compose up (pulls Ollama model)
-bun run sandbox:stop     # docker compose down -v (destructive: wipes volume)
+bun run llm-box:start    # Docker Compose up (pulls Ollama model)
+bun run llm-box:stop     # docker compose down -v (destructive: wipes volume)
+bun run search-box:start # Docker Compose up (SearXNG + reader)
+bun run search-box:stop  # docker compose down
 
 bun run test             # Vitest run (frontend tests only)
 bun run test:watch       # Vitest watch mode
