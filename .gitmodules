@@ -1,0 +1,3 @@
+[submodule "external/rag-engine"]
+	path = external/rag-engine
+	url = https://github.com/KB-Helios/rag-engine.git

@@ -12,7 +12,7 @@ use serde_json::json;
 use toml_edit::DocumentMut;
 
 use super::{
-    coerce_json_to_toml, is_allowed_field, is_allowed_section, json_type_name,
+    coerce_json_to_toml, config_io_error, is_allowed_field, is_allowed_section, json_type_name,
     json_value_to_toml_item, patch_document, read_document, reset_section_on_disk,
     write_field_to_disk,
 };
@@ -50,6 +50,15 @@ reader_per_url_timeout_s = 10
 reader_batch_timeout_s = 30
 judge_timeout_s = 30
 router_timeout_s = 45
+
+[engine]
+enabled = true
+mode = "managed"
+grpc_url = "http://127.0.0.1:50051"
+http_url = "http://127.0.0.1:8080"
+startup_timeout_s = 30
+context_top_k = 5
+fallback_to_ollama = true
 "#;
 
 fn parse_sample() -> DocumentMut {
@@ -60,22 +69,22 @@ fn parse_sample() -> DocumentMut {
 
 #[test]
 fn allowed_fields_count_matches_schema_field_count() {
-    // Hand-counted from `AppConfig`: inference(2) + prompt(1) + window(3) + quote(3)
-    // + search(10) = 19 tunable fields. The active model slug lives in the
+    // Hand-counted from `AppConfig`: inference(3) + prompt(1) + window(3) + quote(3)
+    // + search(10) + engine(7) = 27 tunable fields. The active model slug lives in the
     // SQLite app_config table via ActiveModelState, not in TOML. The collapsed
     // bar height and hide-commit delay are baked into the frontend (see
     // `WindowSection` doc) because they have no perceptible effect across
     // their usable range. If this assertion fails, the schema has drifted
     // from the allowlist and someone added a field without extending
     // ALLOWED_FIELDS.
-    assert_eq!(ALLOWED_FIELDS.len(), 20);
+    assert_eq!(ALLOWED_FIELDS.len(), 27);
 }
 
 #[test]
 fn allowed_sections_match_app_config_top_level_keys() {
     assert_eq!(
         ALLOWED_SECTIONS,
-        &["inference", "prompt", "window", "quote", "search"]
+        &["inference", "prompt", "window", "quote", "search", "engine"]
     );
 }
 
@@ -83,6 +92,7 @@ fn allowed_sections_match_app_config_top_level_keys() {
 fn is_allowed_field_accepts_known_pair() {
     assert!(is_allowed_field("inference", "ollama_url"));
     assert!(is_allowed_field("search", "router_timeout_s"));
+    assert!(is_allowed_field("engine", "grpc_url"));
 }
 
 #[test]
@@ -434,6 +444,19 @@ fn read_document_parse_error_for_invalid_toml() {
     match err {
         ConfigError::Parse { path: p, .. } => assert_eq!(p, path),
         other => panic!("expected Parse, got {other:?}"),
+    }
+}
+
+#[test]
+fn config_io_error_maps_path_and_source() {
+    let path = PathBuf::from("config.toml");
+    let err = config_io_error(&path, std::io::Error::other("disk full"));
+    match err {
+        ConfigError::IoError { path: p, source } => {
+            assert_eq!(p, path);
+            assert_eq!(source.to_string(), "disk full");
+        }
+        other => panic!("expected IoError, got {other:?}"),
     }
 }
 

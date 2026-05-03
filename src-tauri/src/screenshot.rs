@@ -23,10 +23,10 @@ use std::path::PathBuf;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use tauri::Manager;
 
-/// Returns a unique `/tmp/<uuid>-thuki.png` path for a single screenshot capture.
+/// Returns a unique temporary `<uuid>-thuki.png` path for a single screenshot capture.
 /// A new UUID is generated on every call, preventing collisions.
 pub fn temp_screenshot_path() -> PathBuf {
-    PathBuf::from(format!("/tmp/{}-thuki.png", uuid::Uuid::new_v4()))
+    std::env::temp_dir().join(format!("{}-thuki.png", uuid::Uuid::new_v4()))
 }
 
 /// Encodes raw bytes to a standard base64 string for IPC transfer.
@@ -94,14 +94,25 @@ pub async fn capture_screenshot_command(
     // keyboard focus (mirrors the pattern in lib.rs).
     let show_handle = app_handle.clone();
     let _ = app_handle.run_on_main_thread(move || {
-        use tauri_nspanel::ManagerExt;
-        match show_handle.get_webview_panel("main") {
-            Ok(panel) => panel.show_and_make_key(),
-            Err(_) => {
-                if let Some(w) = show_handle.get_webview_window("main") {
-                    let _ = w.show();
-                    let _ = w.set_focus();
+        #[cfg(target_os = "macos")]
+        {
+            use tauri_nspanel::ManagerExt;
+            match show_handle.get_webview_panel("main") {
+                Ok(panel) => panel.show_and_make_key(),
+                Err(_) => {
+                    if let Some(w) = show_handle.get_webview_window("main") {
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                    }
                 }
+            }
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            if let Some(w) = show_handle.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.set_focus();
             }
         }
     });
@@ -479,7 +490,10 @@ mod tests {
     fn temp_screenshot_path_is_in_tmp_and_ends_with_png() {
         let path = temp_screenshot_path();
         let s = path.to_str().unwrap();
-        assert!(s.starts_with("/tmp/"), "expected /tmp/ prefix, got: {s}");
+        assert!(
+            path.starts_with(std::env::temp_dir()),
+            "expected temp directory prefix, got: {s}"
+        );
         assert!(
             s.ends_with("-thuki.png"),
             "expected -thuki.png suffix, got: {s}"

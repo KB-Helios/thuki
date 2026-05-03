@@ -280,11 +280,10 @@ async fn fetch_one(client: &Client, base: &str, url: &str) -> FetchOutcome {
     match res {
         Err(e) => {
             // reqwest wraps the OS-level message in source chains, so
-            // `to_string()` alone misses "Connection refused". Use
-            // `is_connect()` first (catches TCP-level failures), then fall
-            // back to the string classifier for timeout/DNS variants where
-            // `is_connect()` is false.
-            if e.is_connect() || is_transient_connect_error(&e.to_string()) {
+            // `to_string()` alone misses "Connection refused". Use typed
+            // reqwest classifiers first, then fall back to the string
+            // classifier for DNS variants and platform-specific messages.
+            if e.is_connect() || e.is_timeout() || is_transient_connect_error(&e.to_string()) {
                 FetchOutcome::ServiceUnavailable(url.to_string())
             } else {
                 FetchOutcome::Failed(url.to_string())
@@ -315,11 +314,22 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    const SERVICE_UNAVAILABLE_PER_URL_TIMEOUT_S: u64 = 1;
+    const SERVICE_UNAVAILABLE_BATCH_TIMEOUT_S: u64 = 4;
+
     async fn client_for(server: &MockServer) -> ReaderClient {
         ReaderClient::new_with_base(
             server.uri(),
             DEFAULT_READER_PER_URL_TIMEOUT_S,
             TEST_READER_BATCH_TIMEOUT_S,
+        )
+    }
+
+    fn unreachable_client() -> ReaderClient {
+        ReaderClient::new_with_base(
+            "http://127.0.0.1:1",
+            SERVICE_UNAVAILABLE_PER_URL_TIMEOUT_S,
+            SERVICE_UNAVAILABLE_BATCH_TIMEOUT_S,
         )
     }
 
@@ -391,12 +401,9 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_batch_reports_unreachable_service() {
-        // server not started; port 1 is unprivileged nothingness.
-        let client = ReaderClient::new_with_base(
-            "http://127.0.0.1:1".to_string(),
-            DEFAULT_READER_PER_URL_TIMEOUT_S,
-            TEST_READER_BATCH_TIMEOUT_S,
-        );
+        // Server not started; give the per-URL timeout enough room to classify
+        // the connect failure before the batch timeout wins on Windows.
+        let client = unreachable_client();
         let res = client.fetch_batch(&["https://a.com/1".to_string()]).await;
         assert_eq!(res, Err(ReaderError::ServiceUnavailable));
     }
@@ -612,11 +619,7 @@ mod tests {
 
     #[tokio::test]
     async fn progress_reports_service_unavailable_when_all_fail_with_connect_error() {
-        let client = ReaderClient::new_with_base(
-            "http://127.0.0.1:1".to_string(),
-            DEFAULT_READER_PER_URL_TIMEOUT_S,
-            TEST_READER_BATCH_TIMEOUT_S,
-        );
+        let client = unreachable_client();
         let res = client
             .fetch_batch_with_progress(
                 &["https://a.com/1".to_string()],

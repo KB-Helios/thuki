@@ -237,6 +237,7 @@ export function ConversationView({
             isLastAssistant &&
             !msg.content &&
             !msg.thinkingContent &&
+            !msg.contextSources &&
             !msg.sandboxUnavailable &&
             !msg.fromSearch &&
             !msg.fromThink
@@ -263,6 +264,7 @@ export function ConversationView({
                 !!msg.thinkingContent
               }
               searchSources={msg.searchSources}
+              contextSources={msg.contextSources}
               searchWarnings={msg.searchWarnings}
               sandboxUnavailable={msg.sandboxUnavailable}
               searchTraces={msg.searchTraces}
@@ -283,6 +285,7 @@ export function ConversationView({
         messages[messages.length - 1]?.role === 'assistant' &&
         !messages[messages.length - 1]?.content &&
         !messages[messages.length - 1]?.thinkingContent &&
+        !messages[messages.length - 1]?.contextSources &&
         !messages[messages.length - 1]?.fromSearch &&
         !messages[messages.length - 1]?.fromThink ? (
           <LoadingStage label={searchStageLabel(searchStage)} />

@@ -7,13 +7,19 @@ import {
 import checkedInCommandsMarkdown from '../../../docs/commands.md?raw';
 import checkedInPromptAppendix from '../../../src-tauri/prompts/generated/slash_commands.txt?raw';
 
+const normalizeLineEndings = (value: string) => value.replace(/\r\n/g, '\n');
+
 describe('generated command artifacts', () => {
   it('renders docs markdown that matches the checked-in file', () => {
-    expect(renderCommandsMarkdown()).toBe(checkedInCommandsMarkdown);
+    expect(renderCommandsMarkdown()).toBe(
+      normalizeLineEndings(checkedInCommandsMarkdown),
+    );
   });
 
   it('renders prompt appendix that matches the checked-in file', () => {
-    expect(renderSlashCommandPromptAppendix()).toBe(checkedInPromptAppendix);
+    expect(renderSlashCommandPromptAppendix()).toBe(
+      normalizeLineEndings(checkedInPromptAppendix),
+    );
   });
 
   it('includes /search in both generated artifacts', () => {

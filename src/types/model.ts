@@ -15,6 +15,10 @@ export interface ModelPickerState {
   active: string | null;
   /** All locally installed Ollama model names available for selection. */
   all: string[];
+  /** Backend that produced this picker payload. */
+  backend?: 'engine' | 'ollama';
+  /** Whether the selected backend was reachable during the picker fetch. */
+  backendReachable?: boolean;
   /**
    * Whether the Rust backend successfully reached the local Ollama daemon
    * during the last picker fetch. False when `/api/tags` errored (connection

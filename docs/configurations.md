@@ -73,6 +73,16 @@ reader_per_url_timeout_s = 10
 reader_batch_timeout_s = 30
 judge_timeout_s = 30
 router_timeout_s = 45
+
+[engine]
+# rag-engine is the primary backend for normal text chat.
+enabled = true
+mode = "managed"
+grpc_url = "http://127.0.0.1:50051"
+http_url = "http://127.0.0.1:8080"
+startup_timeout_s = 30
+context_top_k = 5
+fallback_to_ollama = true
 ```
 
 ## Reading the reference tables
@@ -171,6 +181,22 @@ For security, both URLs default to your local machine (`127.0.0.1`) and should s
 | `DEFAULT_READER_RETRY_DELAY_MS` | `500`                      | No       | Balances pressure on the sandbox reader against perceived responsiveness; no user signal that it needs to vary.                              | —             | If a page fetch fails, this is how long (in milliseconds) Thuki waits before trying again, so the reader service does not get hammered with retries.                                                                                                                                                                                  |
 | `DEFAULT_MAX_QUERY_CHARS`       | `500`                      | No       | Defense-in-depth bound on outgoing queries to external engines; exposing it lets a malformed prompt DOS upstream services.                   | —             | The longest a search query can be (in characters) before Thuki trims it. A safety cap on what gets sent to the search engine; the AI's queries are normally well under this.                                                                                                                                                          |
 | `DEFAULT_MAX_SNIPPET_CHARS`     | `500`                      | No       | Defense-in-depth bound on incoming text from external engines; exposing it lets a malicious result flood the rerank prompt.                  | —             | The longest each search-result snippet (the title and short blurb under each link) can be before Thuki trims it. A safety cap to keep an oversized result from blowing up the AI's prompt.                                                                                                                                            |
+
+### `[engine]`
+
+Settings for the bundled `KB-Helios/rag-engine` backend. In managed mode Thuki starts the Go control plane as a sidecar and waits for its gRPC endpoint. The control plane owns the Rust daemon lifecycle. Normal text chat uses `Runtime`, `Rag`, and `Context` over gRPC; HTTP is kept for diagnostics and readiness.
+
+Ollama remains the fallback path for image input, `/screen`, `/think`, or engine startup failure when `fallback_to_ollama = true`.
+
+| Constant              | Default                    | Tunable? | Why not tunable | Bounds        | Description                                                                                                                                                                                                                           |
+| :-------------------- | :------------------------- | :------- | :-------------- | :------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `enabled`             | `true`                     | Yes      | —               | boolean       | Enables rag-engine as the primary backend for normal text chat. Turn off to force the legacy Ollama path for every chat request.                                                                                                      |
+| `mode`                | `"managed"`                | Yes      | —               | `managed` or `external` | `managed` lets Thuki start the bundled Go control-plane sidecar. `external` keeps the same gRPC contract but assumes you started rag-engine yourself.                                                                                  |
+| `grpc_url`            | `"http://127.0.0.1:50051"` | Yes      | —               | non-empty URL | gRPC endpoint for `Runtime`, `Rag`, and `Context`. Change only if you run the engine on a different loopback port.                                                                                                                    |
+| `http_url`            | `"http://127.0.0.1:8080"`  | Yes      | —               | non-empty URL | HTTP diagnostics/readiness endpoint. Chat inference does not use this path.                                                                                                                                                            |
+| `startup_timeout_s`   | `30`                       | Yes      | —               | `[1, 300]`    | Seconds Thuki waits for managed rag-engine startup. Raise on slow hardware or first-run model/index initialization; lower to fall back to Ollama faster when the sidecar cannot bind.                                                 |
+| `context_top_k`       | `5`                        | Yes      | —               | `[0, 20]`     | Number of local RAG results prepended to normal text chat. Raise for richer local context at the cost of more prompt tokens; lower for faster, smaller prompts. `0` keeps engine inference on but disables local-context augmentation. |
+| `fallback_to_ollama`  | `true`                     | Yes      | —               | boolean       | If enabled, Thuki routes the turn through Ollama when rag-engine is unavailable or the turn uses a v1 unsupported path such as image input or `/think`.                                                                                |
 
 ### `[activation]` (not in TOML)
 

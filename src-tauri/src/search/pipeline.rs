@@ -319,6 +319,9 @@ pub(super) fn translate_chunk(chunk: StreamChunk) -> SearchEvent {
         },
         StreamChunk::Done => SearchEvent::Done { metadata: None },
         StreamChunk::Cancelled => SearchEvent::Cancelled,
+        StreamChunk::ContextSources(_) => SearchEvent::Token {
+            content: String::new(),
+        },
         StreamChunk::Error(e) => SearchEvent::Error { message: e.message },
     }
 }
@@ -2170,6 +2173,17 @@ mod tests {
     }
 
     #[test]
+    fn translate_chunk_context_sources_suppressed() {
+        let out = translate_chunk(StreamChunk::ContextSources(Vec::new()));
+        assert_eq!(
+            out,
+            SearchEvent::Token {
+                content: String::new()
+            }
+        );
+    }
+
+    #[test]
     fn translate_chunk_done_maps_to_done() {
         assert_eq!(
             translate_chunk(StreamChunk::Done),
@@ -2400,6 +2414,13 @@ mod agentic_tests {
             events_clone.lock().unwrap().push(e);
         };
         (events, callback)
+    }
+
+    fn service_unavailable_runtime_config() -> config::SearchRuntimeConfig {
+        let mut config = config::SearchRuntimeConfig::default();
+        config.reader_per_url_timeout_s = 1;
+        config.reader_batch_timeout_s = 4;
+        config
     }
 
     fn completed_trace_step<'a>(events: &'a [SearchEvent], id: &str) -> &'a SearchTraceStep {
@@ -3400,13 +3421,14 @@ mod agentic_tests {
         let router = proceed_search_router("test query");
 
         // First judge (snippets) = partial; triggers reader.
-        // Reader will fail (DEFAULT_READER_URL is not running in test).
-        // Second judge (falls back to snippets because no chunks) = sufficient.
+        // Reader will fail, then the second judge falls back to snippets
+        // because no chunks were available.
         let judge = QueueJudge(std::sync::Mutex::new(
             vec![partial_verdict(), sufficient_verdict()]
                 .into_iter()
                 .collect(),
         ));
+        let runtime_config = service_unavailable_runtime_config();
 
         run_agentic(
             &format!("{}/api/chat", ollama.url()),
@@ -3422,7 +3444,7 @@ mod agentic_tests {
             &cb,
             &router,
             &judge,
-            &config::SearchRuntimeConfig::default(),
+            &runtime_config,
             DEFAULT_NUM_CTX,
         )
         .await
@@ -4984,6 +5006,7 @@ mod agentic_tests {
             .into_iter()
             .collect(),
         ));
+        let runtime_config = service_unavailable_runtime_config();
 
         run_agentic(
             &format!("{}/api/chat", ollama_server.uri()),
@@ -4999,7 +5022,7 @@ mod agentic_tests {
             &cb,
             &router,
             &judge,
-            &config::SearchRuntimeConfig::default(),
+            &runtime_config,
             DEFAULT_NUM_CTX,
         )
         .await
@@ -5946,6 +5969,7 @@ mod agentic_tests {
             .into_iter()
             .collect(),
         ));
+        let runtime_config = service_unavailable_runtime_config();
 
         run_agentic(
             &format!("{}/api/chat", ollama_server.uri()),
@@ -5961,7 +5985,7 @@ mod agentic_tests {
             &cb,
             &router,
             &judge,
-            &config::SearchRuntimeConfig::default(),
+            &runtime_config,
             DEFAULT_NUM_CTX,
         )
         .await

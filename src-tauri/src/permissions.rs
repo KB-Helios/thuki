@@ -158,6 +158,55 @@ pub fn quit_and_relaunch(app_handle: tauri::AppHandle, db: tauri::State<crate::h
     app_handle.restart();
 }
 
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub fn check_accessibility_permission() -> bool {
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub fn open_accessibility_settings() -> Result<(), String> {
+    Err("Accessibility settings are only supported on macOS".to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub fn check_screen_recording_permission() -> bool {
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub fn open_screen_recording_settings() -> Result<(), String> {
+    Err("Screen Recording settings are only supported on macOS".to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub fn request_screen_recording_access() {}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub fn check_screen_recording_tcc_granted() -> bool {
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub fn quit_and_relaunch(
+    _app_handle: tauri::AppHandle,
+    _db: tauri::State<crate::history::Database>,
+) {
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

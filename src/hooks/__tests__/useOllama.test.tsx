@@ -32,7 +32,7 @@ describe('useOllama', () => {
       });
 
       expect(invoke).toHaveBeenCalledWith(
-        'ask_ollama',
+        'ask_ai',
         expect.objectContaining({
           message: 'hello world',
           quotedText: null,
@@ -118,7 +118,7 @@ describe('useOllama', () => {
       });
 
       expect(invoke).toHaveBeenCalledWith(
-        'ask_ollama',
+        'ask_ai',
         expect.objectContaining({
           message: 'summarize',
           quotedText: 'selected text',
@@ -145,6 +145,74 @@ describe('useOllama', () => {
         (m) => m.role === 'assistant',
       );
       expect(assistantMsg?.content).toBe('Hello, world');
+    });
+
+    it('records local context sources from engine stream chunks', async () => {
+      const { result } = renderHook(() => useOllama(''));
+
+      await act(async () => {
+        await result.current.ask('hello');
+      });
+
+      const channel = getChannel();
+      expect(channel).not.toBeNull();
+
+      act(() => {
+        channel!.simulateMessage({
+          type: 'ContextSources',
+          data: [
+            {
+              title: 'Design Notes',
+              uri: 'file:///notes.md',
+              snippet: 'local snippet',
+            },
+          ],
+        });
+      });
+
+      const assistantMsg = result.current.messages.find(
+        (m) => m.role === 'assistant',
+      );
+      expect(assistantMsg?.contextSources).toEqual([
+        {
+          title: 'Design Notes',
+          uri: 'file:///notes.md',
+          snippet: 'local snippet',
+        },
+      ]);
+    });
+
+    it('clears local context sources when engine emits an empty context chunk', async () => {
+      const { result } = renderHook(() => useOllama(''));
+
+      await act(async () => {
+        await result.current.ask('hello');
+      });
+
+      const channel = getChannel();
+      expect(channel).not.toBeNull();
+
+      act(() => {
+        channel!.simulateMessage({
+          type: 'ContextSources',
+          data: [
+            {
+              title: 'Design Notes',
+              uri: 'file:///notes.md',
+              snippet: 'local snippet',
+            },
+          ],
+        });
+        channel!.simulateMessage({
+          type: 'ContextSources',
+          data: [],
+        });
+      });
+
+      const assistantMsg = result.current.messages.find(
+        (m) => m.role === 'assistant',
+      );
+      expect(assistantMsg?.contextSources).toBeUndefined();
     });
 
     it('keeps assistant message in place on Done chunk', async () => {
@@ -243,7 +311,7 @@ describe('useOllama', () => {
       });
 
       expect(invoke).toHaveBeenCalledWith(
-        'ask_ollama',
+        'ask_ai',
         expect.objectContaining({
           message: 'composed prompt for model',
         }),
@@ -262,7 +330,7 @@ describe('useOllama', () => {
       });
 
       expect(invoke).toHaveBeenCalledWith(
-        'ask_ollama',
+        'ask_ai',
         expect.objectContaining({
           message: 'hello world',
         }),
@@ -283,7 +351,7 @@ describe('useOllama', () => {
       });
 
       expect(invoke).toHaveBeenCalledWith(
-        'ask_ollama',
+        'ask_ai',
         expect.objectContaining({
           message: 'hello world',
         }),
@@ -311,7 +379,7 @@ describe('useOllama', () => {
         }),
       );
       expect(invoke).toHaveBeenCalledWith(
-        'ask_ollama',
+        'ask_ai',
         expect.objectContaining({
           message: '',
           imagePaths: ['/tmp/img1.jpg'],
@@ -359,7 +427,7 @@ describe('useOllama', () => {
         }),
       );
       expect(invoke).toHaveBeenCalledWith(
-        'ask_ollama',
+        'ask_ai',
         expect.objectContaining({
           message: 'describe this',
           imagePaths: ['/tmp/img1.jpg', '/tmp/img2.jpg'],
@@ -376,7 +444,7 @@ describe('useOllama', () => {
 
       expect(result.current.messages[0].imagePaths).toBeUndefined();
       expect(invoke).toHaveBeenCalledWith(
-        'ask_ollama',
+        'ask_ai',
         expect.objectContaining({
           imagePaths: null,
         }),
@@ -550,7 +618,7 @@ describe('useOllama', () => {
           latestChannel = args.onEvent as ReturnType<typeof getChannel>;
         }
 
-        if (cmd === 'ask_ollama') {
+        if (cmd === 'ask_ai') {
           askMessages.push(String(args?.message ?? ''));
           if (askMessages.length === 1) {
             return new Promise<void>((resolve) => {
@@ -613,7 +681,7 @@ describe('useOllama', () => {
       let rejectInvoke!: (error: Error) => void;
 
       invoke.mockImplementation(async (cmd, args) => {
-        if (cmd === 'ask_ollama') {
+        if (cmd === 'ask_ai') {
           channel = args?.onEvent as ReturnType<typeof getChannel>;
           return new Promise<void>((_, reject) => {
             rejectInvoke = reject;
@@ -1088,7 +1156,7 @@ describe('useOllama', () => {
       });
 
       expect(invoke).toHaveBeenCalledWith(
-        'ask_ollama',
+        'ask_ai',
         expect.objectContaining({
           think: true,
         }),
@@ -1103,7 +1171,7 @@ describe('useOllama', () => {
       });
 
       expect(invoke).toHaveBeenCalledWith(
-        'ask_ollama',
+        'ask_ai',
         expect.objectContaining({
           think: false,
         }),

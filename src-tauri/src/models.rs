@@ -25,6 +25,7 @@ use crate::config::defaults::{
 };
 use crate::config::AppConfig;
 use crate::database::{get_config, set_config};
+use crate::engine::EngineClient;
 use crate::history::Database;
 
 /// `app_config` key used to persist the user's selected model slug.
@@ -244,11 +245,71 @@ async fn fetch_installed_model_names_inner(
 #[cfg_attr(not(coverage), tauri::command)]
 pub async fn get_model_picker_state(
     client: tauri::State<'_, reqwest::Client>,
+    engine_client: tauri::State<'_, EngineClient>,
     db: tauri::State<'_, Database>,
     active_model: tauri::State<'_, ActiveModelState>,
     config: tauri::State<'_, parking_lot::RwLock<AppConfig>>,
 ) -> Result<serde_json::Value, String> {
-    let ollama_url = config.read().inference.ollama_url.clone();
+    let config_snapshot = config.read().clone();
+    if config_snapshot.engine.enabled {
+        match engine_client
+            .list_models(&config_snapshot.engine.grpc_url)
+            .await
+        {
+            Ok(models) => {
+                let installed: Vec<String> = models
+                    .into_iter()
+                    .map(|model| {
+                        if model.id.is_empty() {
+                            model.name
+                        } else {
+                            model.id
+                        }
+                    })
+                    .filter(|model| !model.trim().is_empty())
+                    .collect();
+                let resolved = {
+                    let conn = db.0.lock().map_err(|e| e.to_string())?;
+                    let persisted =
+                        get_config(&conn, ACTIVE_MODEL_KEY).map_err(|e| e.to_string())?;
+                    let resolved = resolve_active_model(persisted.as_deref(), &installed);
+                    if let Some(slug) = resolved.as_deref() {
+                        if should_persist_resolved(&installed, persisted.as_deref(), slug) {
+                            set_config(&conn, ACTIVE_MODEL_KEY, slug).map_err(|e| e.to_string())?;
+                        }
+                    }
+                    resolved
+                };
+
+                {
+                    let mut guard = active_model.0.lock().map_err(|e| e.to_string())?;
+                    *guard = resolved.clone();
+                }
+
+                return Ok(build_picker_state_payload_with_backend(
+                    resolved.as_deref(),
+                    &installed,
+                    "engine",
+                    true,
+                    true,
+                ));
+            }
+            Err(_) if !config_snapshot.engine.fallback_to_ollama => {
+                let mut guard = active_model.0.lock().map_err(|e| e.to_string())?;
+                *guard = None;
+                return Ok(build_picker_state_payload_with_backend(
+                    None,
+                    &[],
+                    "engine",
+                    false,
+                    false,
+                ));
+            }
+            Err(_) => {}
+        }
+    }
+
+    let ollama_url = config_snapshot.inference.ollama_url.clone();
     let fetch_result = fetch_installed_model_names(&client, &ollama_url).await;
 
     let installed = match fetch_result {
@@ -295,6 +356,22 @@ pub fn build_picker_state_payload(
     installed: &[String],
     ollama_reachable: bool,
 ) -> serde_json::Value {
+    build_picker_state_payload_with_backend(
+        active,
+        installed,
+        "ollama",
+        ollama_reachable,
+        ollama_reachable,
+    )
+}
+
+pub fn build_picker_state_payload_with_backend(
+    active: Option<&str>,
+    installed: &[String],
+    backend: &str,
+    backend_reachable: bool,
+    ollama_reachable: bool,
+) -> serde_json::Value {
     let active_value = match active {
         Some(slug) => serde_json::Value::String(slug.to_string()),
         None => serde_json::Value::Null,
@@ -302,6 +379,8 @@ pub fn build_picker_state_payload(
     serde_json::json!({
         "active": active_value,
         "all": installed,
+        "backend": backend,
+        "backendReachable": backend_reachable,
         "ollamaReachable": ollama_reachable,
     })
 }
@@ -772,6 +851,8 @@ mod tests {
         let payload = build_picker_state_payload(None, &[], false);
         assert_eq!(payload["active"], serde_json::Value::Null);
         assert_eq!(payload["all"], serde_json::json!([]));
+        assert_eq!(payload["backend"], serde_json::json!("ollama"));
+        assert_eq!(payload["backendReachable"], serde_json::Value::Bool(false));
         assert_eq!(payload["ollamaReachable"], serde_json::Value::Bool(false));
     }
 
@@ -783,6 +864,8 @@ mod tests {
         let payload = build_picker_state_payload(None, &[], true);
         assert_eq!(payload["active"], serde_json::Value::Null);
         assert_eq!(payload["all"], serde_json::json!([]));
+        assert_eq!(payload["backend"], serde_json::json!("ollama"));
+        assert_eq!(payload["backendReachable"], serde_json::Value::Bool(true));
         assert_eq!(payload["ollamaReachable"], serde_json::Value::Bool(true));
     }
 
@@ -797,6 +880,23 @@ mod tests {
             payload["all"],
             serde_json::json!(["gemma4:e2b", "gemma4:e4b"])
         );
+        assert_eq!(payload["backend"], serde_json::json!("ollama"));
+        assert_eq!(payload["backendReachable"], serde_json::Value::Bool(true));
+        assert_eq!(payload["ollamaReachable"], serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn picker_payload_can_report_engine_backend_with_deprecated_ollama_alias() {
+        let installed = vec!["model.gguf".to_string()];
+        let payload = build_picker_state_payload_with_backend(
+            Some("model.gguf"),
+            &installed,
+            "engine",
+            true,
+            true,
+        );
+        assert_eq!(payload["backend"], serde_json::json!("engine"));
+        assert_eq!(payload["backendReachable"], serde_json::Value::Bool(true));
         assert_eq!(payload["ollamaReachable"], serde_json::Value::Bool(true));
     }
 

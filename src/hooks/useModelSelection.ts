@@ -14,12 +14,23 @@ function isModelPickerState(value: unknown): value is ModelPickerState {
   const candidate = value as {
     active?: unknown;
     all?: unknown;
+    backend?: unknown;
+    backendReachable?: unknown;
     ollamaReachable?: unknown;
   };
   const activeOk =
     candidate.active === null || typeof candidate.active === 'string';
+  const backendOk =
+    candidate.backend === undefined ||
+    candidate.backend === 'engine' ||
+    candidate.backend === 'ollama';
+  const backendReachableOk =
+    candidate.backendReachable === undefined ||
+    typeof candidate.backendReachable === 'boolean';
   return (
     activeOk &&
+    backendOk &&
+    backendReachableOk &&
     Array.isArray(candidate.all) &&
     candidate.all.every((entry) => typeof entry === 'string') &&
     typeof candidate.ollamaReachable === 'boolean'
@@ -114,9 +125,16 @@ export function useModelSelection(): UseModelSelectionResult {
         setOllamaReachable(false);
         return;
       }
+      const backend = state.backend === undefined ? 'ollama' : state.backend;
+      const backendReachable =
+        state.backendReachable === undefined
+          ? state.ollamaReachable
+          : state.backendReachable;
       setActiveModelState(state.active);
       setAvailableModels(state.all);
-      setOllamaReachable(state.ollamaReachable);
+      setOllamaReachable(
+        backend === 'engine' ? backendReachable : state.ollamaReachable,
+      );
     } catch {
       if (!isLatest(token)) return;
       setActiveModelState(null);

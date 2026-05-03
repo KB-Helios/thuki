@@ -10,7 +10,9 @@
 //! PR will also call it from the `set_config` command, at which point the
 //! lock-held-during-fsync trade-off documented in the design doc applies.
 
-use std::fs::{File, OpenOptions};
+#[cfg(unix)]
+use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};

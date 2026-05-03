@@ -82,6 +82,23 @@ fn config_path(app: &AppHandle) -> Result<PathBuf, ConfigError> {
     Ok(dir.join(CONFIG_FILE_NAME))
 }
 
+fn config_io_error(path: &Path, source: std::io::Error) -> ConfigError {
+    ConfigError::IoError {
+        path: path.to_path_buf(),
+        source,
+    }
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn atomic_write_config_bytes(path: &Path, bytes: &[u8]) -> Result<(), ConfigError> {
+    config::atomic_write_bytes(path, bytes).map_err(|source| config_io_error(path, source))
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn atomic_write_config(path: &Path, value: &AppConfig) -> Result<(), ConfigError> {
+    config::atomic_write(path, value).map_err(|source| config_io_error(path, source))
+}
+
 /// Returns whether a `(section, key)` pair is permitted by the allowlist.
 fn is_allowed_field(section: &str, key: &str) -> bool {
     ALLOWED_FIELDS
@@ -102,8 +119,8 @@ fn is_allowed_section(section: &str) -> bool {
 /// depending on event delivery (Tauri silently drops emits to closed
 /// windows; mount-time fetch + focus-event reload guarantees the open
 /// window always reflects the on-disk truth).
-#[tauri::command]
 #[cfg_attr(coverage_nightly, coverage(off))]
+#[cfg_attr(not(coverage), tauri::command)]
 pub fn get_config(state: State<'_, RwLock<AppConfig>>) -> AppConfig {
     state.read().clone()
 }
@@ -112,8 +129,8 @@ pub fn get_config(state: State<'_, RwLock<AppConfig>>) -> AppConfig {
 /// after the loader has clamped / corrected the new value.
 ///
 /// See module docs for the full security and concurrency contract.
-#[tauri::command]
 #[cfg_attr(coverage_nightly, coverage(off))]
+#[cfg_attr(not(coverage), tauri::command)]
 pub fn set_config_field(
     section: String,
     key: String,
@@ -157,12 +174,7 @@ pub(crate) fn write_field_to_disk(
     let mut doc = read_document(path)?;
     patch_document(&mut doc, section, key, value)?;
 
-    config::atomic_write_bytes(path, doc.to_string().as_bytes()).map_err(|source| {
-        ConfigError::IoError {
-            path: path.to_path_buf(),
-            source,
-        }
-    })?;
+    atomic_write_config_bytes(path, doc.to_string().as_bytes())?;
 
     config::load_from_path(path)
 }
@@ -177,8 +189,8 @@ pub(crate) fn write_field_to_disk(
 ///
 /// Whole-file reset rewrites the file with `atomic_write(&AppConfig::default)`,
 /// which produces byte-for-byte identical output to a fresh first-run seed.
-#[tauri::command]
 #[cfg_attr(coverage_nightly, coverage(off))]
+#[cfg_attr(not(coverage), tauri::command)]
 pub fn reset_config(
     section: Option<String>,
     app: AppHandle,
@@ -225,19 +237,9 @@ pub(crate) fn reset_section_on_disk(
             .cloned()
             .expect("ALLOWED_SECTIONS implies AppConfig::default has this section");
         doc.insert(section_name, new_section);
-        config::atomic_write_bytes(path, doc.to_string().as_bytes()).map_err(|source| {
-            ConfigError::IoError {
-                path: path.to_path_buf(),
-                source,
-            }
-        })?;
+        atomic_write_config_bytes(path, doc.to_string().as_bytes())?;
     } else {
-        config::atomic_write(path, &AppConfig::default()).map_err(|source| {
-            ConfigError::IoError {
-                path: path.to_path_buf(),
-                source,
-            }
-        })?;
+        atomic_write_config(path, &AppConfig::default())?;
     }
 
     config::load_from_path(path)
@@ -249,8 +251,8 @@ pub(crate) fn reset_section_on_disk(
 /// "↻ Refresh from disk" button in the About tab. Replaces the file-watcher
 /// subsystem the eng review collapsed (see design doc Outside Voice
 /// Resolution).
-#[tauri::command]
 #[cfg_attr(coverage_nightly, coverage(off))]
+#[cfg_attr(not(coverage), tauri::command)]
 pub fn reload_config_from_disk(
     app: AppHandle,
     state: State<'_, RwLock<AppConfig>>,
@@ -271,8 +273,8 @@ pub fn reload_config_from_disk(
 /// The Settings window invokes this on mount; if a marker is returned, it
 /// renders a dismissible recovery banner. The marker is deleted from disk on
 /// read so the banner appears at most once per corrupt event.
-#[tauri::command]
 #[cfg_attr(coverage_nightly, coverage(off))]
+#[cfg_attr(not(coverage), tauri::command)]
 pub fn get_corrupt_marker(app: AppHandle) -> Result<Option<CorruptMarker>, ConfigError> {
     let path = config_path(&app)?;
     let dir = path
@@ -286,8 +288,8 @@ pub fn get_corrupt_marker(app: AppHandle) -> Result<Option<CorruptMarker>, Confi
 ///
 /// Thin FFI wrapper (excluded from coverage) over `open -R`, which is the
 /// macOS-native "reveal in Finder" affordance.
-#[tauri::command]
 #[cfg_attr(coverage_nightly, coverage(off))]
+#[cfg_attr(not(coverage), tauri::command)]
 pub fn reveal_config_in_finder(app: AppHandle) -> Result<(), String> {
     let path = config_path(&app).map_err(|e| e.to_string())?;
     std::process::Command::new("open")
