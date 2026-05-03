@@ -355,13 +355,8 @@ pub fn build_engine_prompt_from_history(history: &[ChatMessage], current_message
     }
 
     let mut prompt = String::from("Conversation so far:\n");
-    for message in history
-        .iter()
-        .rev()
-        .take(12)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
+    let start_index = history.len().saturating_sub(12);
+    for message in &history[start_index..]
     {
         let role = if message.role == "assistant" {
             "Assistant"
