@@ -71,7 +71,15 @@ The UI morphs between two states: a compact spotlight-style input bar → an exp
 
 ### Sandbox (`sandbox/`)
 
-Docker Compose runs Ollama in a hardened container: `cap_drop: ALL`, `no-new-privileges`, read-only model volume, localhost-only port binding (`127.0.0.1:11434`). Two services: `sandbox-init` (one-shot model pull) and `sandbox-server` (long-running daemon). `sandbox:stop` uses `down -v` which wipes the volume.
+Docker Compose runs Ollama in a hardened container: `cap_drop: ALL`, `no-new-privileges`, read-only model volume, localhost-only port binding (`127.0.0.1:11434`). Two services: `sandbox-init` (one-shot model pull) and `sandbox-server` (long-running daemon). `llm-box:stop` uses `down -v` which wipes the volume.
+
+### Search Sidecars (sandbox/search-box/)
+
+The RAG pipeline relies on two additional sidecar services:
+- **SearXNG** — privacy-respecting metasearch engine.
+- **Reader** — content extraction service that converts HTML to clean markdown for LLM consumption.
+
+These are managed via `bun run search-box:start` and are configured in the `[search]` section of `config.toml`.
 
 ### IPC Pattern
 
