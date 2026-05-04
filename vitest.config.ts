@@ -2,11 +2,19 @@ import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 import { resolve } from 'path';
 
+const isWindows = process.platform === 'win32';
+
 export default defineConfig({
   plugins: [react()],
   test: {
     environment: 'jsdom',
     globals: true,
+    ...(isWindows
+      ? {
+          pool: 'threads' as const,
+          maxWorkers: 1,
+        }
+      : {}),
     setupFiles: ['src/testUtils/setup.ts'],
     include: ['src/**/*.test.{ts,tsx}'],
     coverage: {

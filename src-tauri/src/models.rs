@@ -1010,6 +1010,13 @@ mod tests {
                 vision: false,
                 thinking: true,
             },
+            EngineModelPreview {
+                id: String::new(),
+                name: "   ".to_string(),
+                loaded: false,
+                vision: true,
+                thinking: true,
+            },
         ];
 
         assert_eq!(
@@ -1021,6 +1028,23 @@ mod tests {
         assert!(!capabilities["model-a.gguf"].thinking);
         assert!(!capabilities["fallback-name.gguf"].vision);
         assert!(capabilities["fallback-name.gguf"].thinking);
+        assert!(!capabilities.contains_key("   "));
+    }
+
+    #[test]
+    fn should_probe_engine_models_requires_enabled_engine_with_probe_signal() {
+        let supervisor = EngineSupervisor::default();
+        let mut config = AppConfig::default();
+
+        config.engine.enabled = false;
+        assert!(!should_probe_engine_models(&config, &supervisor));
+
+        config.engine.enabled = true;
+        config.engine.mode = DEFAULT_ENGINE_MODE.to_string();
+        assert!(!should_probe_engine_models(&config, &supervisor));
+
+        config.engine.mode = "external".to_string();
+        assert!(should_probe_engine_models(&config, &supervisor));
     }
 
     // ── resolve_active_model ─────────────────────────────────────────────────
@@ -1497,6 +1521,62 @@ mod tests {
         set_config(&conn, ACTIVE_MODEL_KEY, "gemma4:e4b").unwrap();
         let back = get_config(&conn, ACTIVE_MODEL_KEY).unwrap();
         assert_eq!(back.as_deref(), Some("gemma4:e4b"));
+    }
+
+    #[test]
+    fn persist_active_model_updates_database_and_memory_state() {
+        let conn = crate::database::open_in_memory().unwrap();
+        let db = Database(Mutex::new(conn));
+        let state = ActiveModelState::default();
+
+        persist_active_model(&db, &state, "gemma4:e4b".to_string()).unwrap();
+
+        let conn = db.0.lock().unwrap();
+        let persisted = get_config(&conn, ACTIVE_MODEL_KEY).unwrap();
+        drop(conn);
+        assert_eq!(persisted.as_deref(), Some("gemma4:e4b"));
+        assert_eq!(*state.0.lock().unwrap(), Some("gemma4:e4b".to_string()));
+    }
+
+    #[test]
+    fn persist_active_model_reports_database_lock_poisoning() {
+        let conn = crate::database::open_in_memory().unwrap();
+        let db = Database(Mutex::new(conn));
+        let state = ActiveModelState::default();
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = db.0.lock().unwrap();
+            panic!("poison database lock");
+        });
+
+        let err = persist_active_model(&db, &state, "gemma4:e4b".to_string()).unwrap_err();
+
+        assert!(err.contains("poison"));
+    }
+
+    #[test]
+    fn persist_active_model_reports_database_write_errors() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let db = Database(Mutex::new(conn));
+        let state = ActiveModelState::default();
+
+        let err = persist_active_model(&db, &state, "gemma4:e4b".to_string()).unwrap_err();
+
+        assert!(err.contains("app_config"));
+    }
+
+    #[test]
+    fn persist_active_model_reports_state_lock_poisoning() {
+        let conn = crate::database::open_in_memory().unwrap();
+        let db = Database(Mutex::new(conn));
+        let state = ActiveModelState::default();
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = state.0.lock().unwrap();
+            panic!("poison active-model lock");
+        });
+
+        let err = persist_active_model(&db, &state, "gemma4:e4b".to_string()).unwrap_err();
+
+        assert!(err.contains("poison"));
     }
 
     #[test]

@@ -26,6 +26,7 @@ use crate::config::defaults::{
 };
 use crate::config::AppConfig;
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub mod pb {
     tonic::include_proto!("engine");
 }
@@ -245,7 +246,7 @@ impl EngineClient {
         &self,
         params: EngineInferenceParams,
         cancel_token: CancellationToken,
-        on_event: impl FnMut(EngineStreamEvent),
+        on_event: impl FnMut(EngineStreamEvent) + Send,
     ) -> Result<String, EngineError> {
         let mut client = self.runtime_client(&params.grpc_url).await?;
         let request = pb::InferenceRequest {
@@ -261,18 +262,15 @@ impl EngineClient {
             .stream_inference(tonic::Request::new(outbound))
             .await?
             .into_inner();
-        Ok(collect_inference_stream(&mut stream, cancel_token, on_event).await?)
+        Ok(collect_inference_stream(&mut stream, cancel_token, Box::new(on_event)).await?)
     }
 }
 
-async fn collect_inference_stream<S>(
-    stream: &mut S,
+async fn collect_inference_stream(
+    stream: &mut (dyn Stream<Item = Result<pb::InferenceResponse, tonic::Status>> + Unpin + Send),
     cancel_token: CancellationToken,
-    mut on_event: impl FnMut(EngineStreamEvent),
-) -> Result<String, tonic::Status>
-where
-    S: Stream<Item = Result<pb::InferenceResponse, tonic::Status>> + Unpin,
-{
+    mut on_event: Box<dyn FnMut(EngineStreamEvent) + Send + '_>,
+) -> Result<String, tonic::Status> {
     let mut accumulated = String::new();
 
     loop {
@@ -732,15 +730,18 @@ pub fn candidate_engine_binary_paths(root: &Path) -> Vec<PathBuf> {
 }
 
 pub fn platform_binary_names(base: &str) -> Vec<String> {
+    platform_binary_names_for(base, option_env!("TAURI_ENV_TARGET_TRIPLE"))
+}
+
+fn platform_binary_names_for(base: &str, target_triple: Option<&str>) -> Vec<String> {
     let mut names = Vec::new();
     let plain = platform_binary_name(base);
     names.push(plain);
-    if let Some(target_triple) = option_env!("TAURI_ENV_TARGET_TRIPLE") {
-        let target_specific = platform_binary_name(&format!("{base}-{target_triple}"));
-        if !names.contains(&target_specific) {
-            names.push(target_specific);
-        }
-    }
+    let Some(target_triple) = target_triple else {
+        return names;
+    };
+    let target_specific = platform_binary_name(&format!("{base}-{target_triple}"));
+    names.push(target_specific);
     names
 }
 
@@ -864,6 +865,10 @@ mod tests {
             parse_endpoint("http://[::1]:50051", "fallback", 42),
             ("::1".to_string(), 50051)
         );
+        assert_eq!(
+            parse_endpoint("file:///tmp/socket", "", 42),
+            ("".to_string(), 42)
+        );
     }
 
     #[test]
@@ -916,6 +921,10 @@ mod tests {
         assert_eq!(mapped.name, "Qwen");
         assert!(mapped.vision);
         assert!(mapped.thinking);
+
+        let mut yes_caps = HashMap::new();
+        yes_caps.insert("vision".to_string(), "yes".to_string());
+        assert!(metadata_bool(&yes_caps, "vision"));
     }
 
     #[test]
@@ -1019,9 +1028,10 @@ mod tests {
         let token = CancellationToken::new();
         let mut events = Vec::new();
 
-        let accumulated = collect_inference_stream(&mut stream, token, |event| events.push(event))
-            .await
-            .unwrap();
+        let accumulated =
+            collect_inference_stream(&mut stream, token, Box::new(|event| events.push(event)))
+                .await
+                .unwrap();
 
         assert_eq!(accumulated, "hello");
         assert_eq!(
@@ -1031,6 +1041,62 @@ mod tests {
                 EngineStreamEvent::Done
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn collect_inference_stream_emits_done_on_complete_flag() {
+        let mut stream = tokio_stream::iter(vec![Ok(pb::InferenceResponse {
+            token: "hello".to_string(),
+            complete: true,
+            ..Default::default()
+        })]);
+        let token = CancellationToken::new();
+        let mut events = Vec::new();
+
+        let accumulated =
+            collect_inference_stream(&mut stream, token, Box::new(|event| events.push(event)))
+                .await
+                .unwrap();
+
+        assert_eq!(accumulated, "hello");
+        assert_eq!(
+            events,
+            vec![
+                EngineStreamEvent::Token("hello".to_string()),
+                EngineStreamEvent::Done
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_inference_stream_ignores_empty_tokens() {
+        let mut stream = tokio_stream::iter(vec![Ok(pb::InferenceResponse {
+            token: String::new(),
+            complete: false,
+            ..Default::default()
+        })]);
+        let token = CancellationToken::new();
+        let mut events = Vec::new();
+
+        let accumulated =
+            collect_inference_stream(&mut stream, token, Box::new(|event| events.push(event)))
+                .await
+                .unwrap();
+
+        assert!(accumulated.is_empty());
+        assert_eq!(events, vec![EngineStreamEvent::Done]);
+    }
+
+    #[tokio::test]
+    async fn collect_inference_stream_propagates_status_errors() {
+        let mut stream = tokio_stream::iter(vec![Err(tonic::Status::unavailable("down"))]);
+        let token = CancellationToken::new();
+
+        let err = collect_inference_stream(&mut stream, token, Box::new(std::mem::drop))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::Unavailable);
     }
 
     #[tokio::test]
@@ -1044,9 +1110,10 @@ mod tests {
         token.cancel();
         let mut events = Vec::new();
 
-        let accumulated = collect_inference_stream(&mut stream, token, |event| events.push(event))
-            .await
-            .unwrap();
+        let accumulated =
+            collect_inference_stream(&mut stream, token, Box::new(|event| events.push(event)))
+                .await
+                .unwrap();
 
         assert!(accumulated.is_empty());
         assert_eq!(events, vec![EngineStreamEvent::Cancelled]);
@@ -1073,11 +1140,26 @@ mod tests {
     fn platform_binary_names_include_tauri_target_variant_when_available() {
         let names = platform_binary_names("ai-engine-server");
         assert!(names.contains(&platform_binary_name("ai-engine-server")));
-        if let Some(target_triple) = option_env!("TAURI_ENV_TARGET_TRIPLE") {
-            assert!(names.contains(&platform_binary_name(&format!(
-                "ai-engine-server-{target_triple}"
-            ))));
-        }
+    }
+
+    #[test]
+    fn platform_binary_names_include_target_variant_when_provided() {
+        let names = platform_binary_names_for("ai-engine-server", Some("x86_64-pc-windows-msvc"));
+        assert_eq!(
+            names,
+            vec![
+                platform_binary_name("ai-engine-server"),
+                platform_binary_name("ai-engine-server-x86_64-pc-windows-msvc")
+            ]
+        );
+    }
+
+    #[test]
+    fn platform_binary_names_omit_target_variant_when_not_provided() {
+        assert_eq!(
+            platform_binary_names_for("ai-engine-server", None),
+            vec![platform_binary_name("ai-engine-server")]
+        );
     }
 
     #[test]

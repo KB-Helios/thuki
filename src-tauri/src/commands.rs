@@ -1901,6 +1901,11 @@ mod tests {
         assert_eq!(build_engine_prompt_from_history(&[], "next"), "next");
     }
 
+    #[test]
+    fn engine_session_id_uses_epoch_suffix() {
+        assert_eq!(engine_session_id(42), "thuki-overlay-42");
+    }
+
     #[tokio::test]
     async fn connection_refused_emits_not_running_error() {
         let client = reqwest::Client::new();
