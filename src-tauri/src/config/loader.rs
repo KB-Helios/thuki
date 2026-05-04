@@ -22,13 +22,15 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::defaults::{
+    BOUNDS_ENGINE_CONTEXT_TOP_K, BOUNDS_ENGINE_STARTUP_TIMEOUT_S,
     BOUNDS_KEEP_WARM_INACTIVITY_MINUTES, BOUNDS_MAX_CHAT_HEIGHT, BOUNDS_MAX_IMAGES,
     BOUNDS_MAX_ITERATIONS, BOUNDS_NUM_CTX, BOUNDS_OVERLAY_WIDTH, BOUNDS_QUOTE_MAX_CONTEXT_LENGTH,
     BOUNDS_QUOTE_MAX_DISPLAY_CHARS, BOUNDS_QUOTE_MAX_DISPLAY_LINES, BOUNDS_SEARXNG_MAX_RESULTS,
-    BOUNDS_TIMEOUT_S, BOUNDS_TOP_K_URLS, DEFAULT_JUDGE_TIMEOUT_S,
-    DEFAULT_KEEP_WARM_INACTIVITY_MINUTES, DEFAULT_MAX_CHAT_HEIGHT, DEFAULT_MAX_IMAGES,
-    DEFAULT_MAX_ITERATIONS, DEFAULT_NUM_CTX, DEFAULT_OLLAMA_URL, DEFAULT_OVERLAY_WIDTH,
-    DEFAULT_QUOTE_MAX_CONTEXT_LENGTH, DEFAULT_QUOTE_MAX_DISPLAY_CHARS,
+    BOUNDS_TIMEOUT_S, BOUNDS_TOP_K_URLS, DEFAULT_ENGINE_CONTEXT_TOP_K, DEFAULT_ENGINE_GRPC_URL,
+    DEFAULT_ENGINE_HTTP_URL, DEFAULT_ENGINE_MODE, DEFAULT_ENGINE_STARTUP_TIMEOUT_S,
+    DEFAULT_JUDGE_TIMEOUT_S, DEFAULT_KEEP_WARM_INACTIVITY_MINUTES, DEFAULT_MAX_CHAT_HEIGHT,
+    DEFAULT_MAX_IMAGES, DEFAULT_MAX_ITERATIONS, DEFAULT_NUM_CTX, DEFAULT_OLLAMA_URL,
+    DEFAULT_OVERLAY_WIDTH, DEFAULT_QUOTE_MAX_CONTEXT_LENGTH, DEFAULT_QUOTE_MAX_DISPLAY_CHARS,
     DEFAULT_QUOTE_MAX_DISPLAY_LINES, DEFAULT_READER_BATCH_TIMEOUT_S,
     DEFAULT_READER_PER_URL_TIMEOUT_S, DEFAULT_READER_URL, DEFAULT_ROUTER_TIMEOUT_S,
     DEFAULT_SEARCH_TIMEOUT_S, DEFAULT_SEARXNG_MAX_RESULTS, DEFAULT_SEARXNG_URL,
@@ -101,6 +103,10 @@ fn rename_corrupt(path: &Path) {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    rename_corrupt_at(path, ts);
+}
+
+fn rename_corrupt_at(path: &Path, ts: u64) {
     let mut target = path.as_os_str().to_os_string();
     target.push(format!(".corrupt-{ts}"));
     let target: PathBuf = target.into();
@@ -123,6 +129,61 @@ fn rename_corrupt(path: &Path) {
             "thuki: [config] could not write corrupt marker at {}: {e}",
             marker_path.display()
         );
+    }
+}
+
+#[cfg(test)]
+mod loader_tests {
+    use super::*;
+
+    fn fresh_temp_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("thuki-loader-tests-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn corrupt_target(path: &Path, ts: u64) -> PathBuf {
+        let mut target = path.as_os_str().to_os_string();
+        target.push(format!(".corrupt-{ts}"));
+        target.into()
+    }
+
+    #[test]
+    fn load_directory_path_returns_in_memory_defaults() {
+        let dir = fresh_temp_dir();
+        let config = load_from_path(&dir).expect("directory read error falls back");
+        assert_eq!(config.inference.ollama_url, DEFAULT_OLLAMA_URL);
+        assert!(dir.is_dir());
+    }
+
+    #[test]
+    fn rename_corrupt_at_returns_when_target_is_blocked() {
+        let dir = fresh_temp_dir();
+        let path = dir.join("config.toml");
+        let ts = 7;
+        let target = corrupt_target(&path, ts);
+        std::fs::write(&path, "garbage").unwrap();
+        std::fs::create_dir(&target).unwrap();
+
+        rename_corrupt_at(&path, ts);
+
+        assert!(path.exists());
+        assert!(target.is_dir());
+    }
+
+    #[test]
+    fn rename_corrupt_at_continues_when_marker_write_fails() {
+        let dir = fresh_temp_dir();
+        let path = dir.join("config.toml");
+        let ts = 8;
+        let target = corrupt_target(&path, ts);
+        std::fs::write(&path, "garbage").unwrap();
+        std::fs::create_dir(dir.join(super::super::CORRUPT_MARKER_FILE_NAME)).unwrap();
+
+        rename_corrupt_at(&path, ts);
+
+        assert!(!path.exists());
+        assert!(target.is_file());
     }
 }
 
@@ -268,6 +329,29 @@ pub(crate) fn resolve(config: &mut AppConfig) {
         );
         config.search.reader_batch_timeout_s = corrected;
     }
+
+    // Engine section: lifecycle and endpoint contract for the rag-engine
+    // sidecar. Only managed/external are accepted so typos do not silently
+    // create an unsupported launch mode.
+    config.engine.mode = normalize_engine_mode(&config.engine.mode);
+    if config.engine.grpc_url.trim().is_empty() {
+        config.engine.grpc_url = DEFAULT_ENGINE_GRPC_URL.to_string();
+    }
+    if config.engine.http_url.trim().is_empty() {
+        config.engine.http_url = DEFAULT_ENGINE_HTTP_URL.to_string();
+    }
+    clamp_u64(
+        &mut config.engine.startup_timeout_s,
+        BOUNDS_ENGINE_STARTUP_TIMEOUT_S,
+        DEFAULT_ENGINE_STARTUP_TIMEOUT_S,
+        "engine.startup_timeout_s",
+    );
+    clamp_u32(
+        &mut config.engine.context_top_k,
+        BOUNDS_ENGINE_CONTEXT_TOP_K,
+        DEFAULT_ENGINE_CONTEXT_TOP_K,
+        "engine.context_top_k",
+    );
 }
 
 /// Composes the user-editable base prompt with the generated slash-command
@@ -329,5 +413,20 @@ fn clamp_u32(value: &mut u32, bounds: (u32, u32), default: u32, field: &str) {
             value = *value
         );
         *value = default;
+    }
+}
+
+fn normalize_engine_mode(value: &str) -> String {
+    match value.trim() {
+        "managed" => "managed".to_string(),
+        "external" => "external".to_string(),
+        other => {
+            if !other.is_empty() {
+                eprintln!(
+                    "thuki: [config] engine.mode={other} is unsupported; using default {DEFAULT_ENGINE_MODE}",
+                );
+            }
+            DEFAULT_ENGINE_MODE.to_string()
+        }
     }
 }

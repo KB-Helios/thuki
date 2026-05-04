@@ -43,6 +43,15 @@ export interface RawAppConfig {
     judge_timeout_s: number;
     router_timeout_s: number;
   };
+  engine?: {
+    enabled: boolean;
+    mode: string;
+    grpc_url: string;
+    http_url: string;
+    startup_timeout_s: number;
+    context_top_k: number;
+    fallback_to_ollama: boolean;
+  };
 }
 
 /** Tagged union returned by the Rust `set_config_field` command on failure. */

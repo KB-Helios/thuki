@@ -67,7 +67,8 @@ Most AI tools require accounts, API keys, or subscriptions that bill you per tok
 - **Context-aware quotes:** highlight any text, then double-tap Control <kbd>⌃</kbd> to open Thuki with the selected text pre-filled as a quote
 - **Throwaway conversations:** fast, lightweight interactions without the overhead of a full chat app
 - **Conversation history:** persist and revisit past conversations across sessions
-- **Fully local LLM:** powered by Ollama; no API keys, no accounts, no cost per query
+- **Fully local LLM:** powered by the bundled rag-engine sidecar, with Ollama fallback for image and thinking turns; no API keys, no accounts, no cost per query
+- **Local context augmentation:** normal text chat can search your local rag-engine store before answering and shows the context sources it used
 - **Isolated sandbox:** optionally run models in a hardened Docker container with capability dropping, read-only volumes, and localhost-only networking
 - **Image input:** paste or drag images and screenshots directly into the chat
 - **Screen capture:** type `/screen` to instantly capture your entire screen and attach it to your question as context
@@ -189,7 +190,11 @@ The `/search` command uses an agentic search pipeline that depends on two local 
 # Clone and install dependencies
 git clone https://github.com/quiet-node/thuki.git
 cd thuki
+git submodule update --init --recursive
 bun install
+
+# Required before packaging the managed sidecar; tests/lint only need the submodule
+bun run engine:build
 
 # Launch in development mode
 bun run dev
@@ -202,7 +207,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development setup guide.
 <details>
 <summary>Click to expand</summary>
 
-Thuki is a **Tauri v2** app (Rust backend + React/TypeScript frontend) that interfaces with a locally running Ollama instance at `http://127.0.0.1:11434`.
+Thuki is a **Tauri v2** app (Rust backend + React/TypeScript frontend). Normal text chat routes through the bundled `KB-Helios/rag-engine` Go control plane over gRPC; that control plane supervises the Rust daemon. Ollama remains available as the fallback for image input, `/screen`, `/think`, and engine startup failure.
 
 ### Dual-Layer Isolation
 

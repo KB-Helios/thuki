@@ -1,8 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import {
+  ENGINE_UNREACHABLE_MESSAGE,
   getCapabilityConflict,
   getEnvironmentMessage,
   isComposeCapabilityConflict,
+  NO_ENGINE_MODELS_INSTALLED_MESSAGE,
   NO_MODELS_INSTALLED_MESSAGE,
   OLLAMA_UNREACHABLE_MESSAGE,
 } from '../capabilityConflicts';
@@ -603,6 +605,18 @@ describe('getEnvironmentMessage', () => {
   it('returns the no-models copy when reachable but installed list is empty (S2)', () => {
     expect(getEnvironmentMessage(true, 0, null)).toBe(
       NO_MODELS_INSTALLED_MESSAGE,
+    );
+  });
+
+  it('returns engine-specific recovery copy for engine reachability failures', () => {
+    expect(getEnvironmentMessage(false, 0, null, 'engine')).toBe(
+      ENGINE_UNREACHABLE_MESSAGE,
+    );
+  });
+
+  it('returns engine-specific no-model copy for an empty engine inventory', () => {
+    expect(getEnvironmentMessage(true, 0, null, 'engine')).toBe(
+      NO_ENGINE_MODELS_INSTALLED_MESSAGE,
     );
   });
 

@@ -73,6 +73,58 @@ describe('useModelSelection', () => {
     expect(result.current.ollamaReachable).toBe(false);
   });
 
+  it('keeps ollamaReachable authoritative when the picker is engine-backed', async () => {
+    invoke.mockResolvedValueOnce({
+      active: 'local-model.gguf',
+      all: ['local-model.gguf'],
+      backend: 'engine',
+      backendReachable: false,
+      ollamaReachable: true,
+    });
+
+    const { result } = renderHook(() => useModelSelection());
+    await act(async () => {});
+
+    expect(result.current.activeModel).toBe('local-model.gguf');
+    expect(result.current.availableModels).toEqual(['local-model.gguf']);
+    expect(result.current.ollamaReachable).toBe(true);
+    expect(result.current.modelBackend).toBe('engine');
+    expect(result.current.modelBackendReachable).toBe(false);
+  });
+
+  it('falls back to ollamaReachable for legacy engine picker payloads', async () => {
+    invoke.mockResolvedValueOnce({
+      active: 'local-model.gguf',
+      all: ['local-model.gguf'],
+      backend: 'engine',
+      ollamaReachable: false,
+    });
+
+    const { result } = renderHook(() => useModelSelection());
+    await act(async () => {});
+
+    expect(result.current.ollamaReachable).toBe(false);
+    expect(result.current.modelBackend).toBe('engine');
+    expect(result.current.modelBackendReachable).toBe(false);
+  });
+
+  it('keeps ollamaReachable authoritative for Ollama-backed payloads', async () => {
+    invoke.mockResolvedValueOnce({
+      active: 'gemma4:e2b',
+      all: ['gemma4:e2b'],
+      backend: 'ollama',
+      backendReachable: false,
+      ollamaReachable: true,
+    });
+
+    const { result } = renderHook(() => useModelSelection());
+    await act(async () => {});
+
+    expect(result.current.ollamaReachable).toBe(true);
+    expect(result.current.modelBackend).toBe('ollama');
+    expect(result.current.modelBackendReachable).toBe(false);
+  });
+
   it('persists a new active model and updates local state', async () => {
     invoke
       .mockResolvedValueOnce({
@@ -191,6 +243,39 @@ describe('useModelSelection', () => {
       active: 'gemma4:e2b',
       all: ['gemma4:e2b'],
       ollamaReachable: 'yes',
+    });
+
+    const { result } = renderHook(() => useModelSelection());
+    await act(async () => {});
+
+    expect(result.current.availableModels).toEqual([]);
+    expect(result.current.activeModel).toBeNull();
+    expect(result.current.ollamaReachable).toBe(false);
+  });
+
+  it('rejects payloads with unknown backend names', async () => {
+    invoke.mockResolvedValueOnce({
+      active: 'mystery',
+      all: ['mystery'],
+      backend: 'remote',
+      ollamaReachable: true,
+    });
+
+    const { result } = renderHook(() => useModelSelection());
+    await act(async () => {});
+
+    expect(result.current.availableModels).toEqual([]);
+    expect(result.current.activeModel).toBeNull();
+    expect(result.current.ollamaReachable).toBe(false);
+  });
+
+  it('rejects payloads with non-boolean backendReachable', async () => {
+    invoke.mockResolvedValueOnce({
+      active: 'mystery',
+      all: ['mystery'],
+      backend: 'engine',
+      backendReachable: 'yes',
+      ollamaReachable: true,
     });
 
     const { result } = renderHook(() => useModelSelection());

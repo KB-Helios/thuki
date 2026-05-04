@@ -20,6 +20,7 @@ import { SEARCH_WARNING_SEVERITY } from '../config/searchWarnings';
 import { SearchTraceBlock } from './SearchTraceBlock';
 import { SandboxSetupCard } from './SandboxSetupCard';
 import { cleanForRender } from '../utils/sanitizeAssistantContent';
+import type { ContextSourcePreview } from '../hooks/useOllama';
 
 /**
  * Extracts a bare hostname from a URL for the sources footer. Strips the
@@ -32,6 +33,10 @@ function domainOf(url: string): string {
   } catch {
     return url;
   }
+}
+
+function isHttpUrl(value: string): boolean {
+  return value.startsWith('http://') || value.startsWith('https://');
 }
 
 /** Pseudo-random but deterministic 0–359 hue derived from a domain string.
@@ -251,6 +256,8 @@ interface ChatBubbleProps {
   /** Source URLs forwarded from the SearXNG results. Rendered as a clickable
    * footer below the answer; clicking opens the URL in the default browser. */
   searchSources?: SearchResultPreview[];
+  /** Local context sources forwarded by rag-engine for normal chat turns. */
+  contextSources?: ContextSourcePreview[];
   /** Warnings emitted by the `/search` pipeline for this turn. Renders a
    * `SearchWarningIcon` beside the Sources collapsible when non-empty. */
   searchWarnings?: SearchWarning[];
@@ -308,6 +315,7 @@ export function ChatBubble({
   isThinkingPending,
   isThinking,
   searchSources,
+  contextSources,
   searchWarnings,
   sandboxUnavailable = false,
   searchTraces,
@@ -480,6 +488,50 @@ export function ChatBubble({
               />
             )}
           </div>
+          {!errorKind && !sandboxUnavailable && !isStreaming && (
+            <>
+              {contextSources && contextSources.length > 0 && (
+                <div
+                  data-testid="context-sources"
+                  className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-white/45"
+                >
+                  <span className="uppercase tracking-wider text-white/25">
+                    Local context
+                  </span>
+                  {contextSources.slice(0, 3).map((source) => {
+                    const label = source.title || source.uri;
+                    const clickable = isHttpUrl(source.uri);
+                    return clickable ? (
+                      <button
+                        key={`${source.uri}-${label}`}
+                        type="button"
+                        title={source.snippet || label}
+                        onClick={() =>
+                          void invoke('open_url', { url: source.uri })
+                        }
+                        className="max-w-[180px] truncate rounded-md border border-white/8 bg-white/[0.03] px-1.5 py-0.5 text-left text-white/55 hover:border-white/16 hover:text-white/75"
+                      >
+                        {label}
+                      </button>
+                    ) : (
+                      <span
+                        key={`${source.uri}-${label}`}
+                        title={source.snippet || label}
+                        className="max-w-[180px] truncate rounded-md border border-white/8 bg-white/[0.03] px-1.5 py-0.5 text-white/55"
+                      >
+                        {label}
+                      </span>
+                    );
+                  })}
+                  {contextSources.length > 3 && (
+                    <span className="text-white/30">
+                      +{contextSources.length - 3}
+                    </span>
+                  )}
+                </div>
+              )}
+            </>
+          )}
           {!errorKind && !sandboxUnavailable && !isStreaming && (
             <AnimatePresence initial={false}>
               {sourcesOpen && searchSources && searchSources.length > 0 && (

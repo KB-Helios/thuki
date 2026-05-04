@@ -795,7 +795,7 @@ describe('App', () => {
       fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false });
     });
 
-    // Wait for invoke to be called (ask_ollama)
+    // Wait for invoke to be called (ask_ai)
     await act(async () => {});
 
     // Simulate streaming tokens
@@ -902,8 +902,8 @@ describe('App', () => {
 
     await act(async () => {});
 
-    // ask_ollama should NOT have been called
-    expect(invoke).not.toHaveBeenCalledWith('ask_ollama', expect.anything());
+    // ask_ai should NOT have been called
+    expect(invoke).not.toHaveBeenCalledWith('ask_ai', expect.anything());
   });
 
   it('fires drag on non-interactive mousedown', async () => {
@@ -1014,7 +1014,7 @@ describe('App', () => {
 
     // Backend receives the message and quoted text separately
     expect(invoke).toHaveBeenCalledWith(
-      'ask_ollama',
+      'ask_ai',
       expect.objectContaining({
         message: 'my question',
         quotedText: 'selected snippet',
@@ -2380,9 +2380,9 @@ describe('App', () => {
       });
       await act(async () => {});
 
-      // ask_ollama should be called with imagePaths
+      // ask_ai should be called with imagePaths
       expect(invoke).toHaveBeenCalledWith(
-        'ask_ollama',
+        'ask_ai',
         expect.objectContaining({
           message: 'describe this',
           imagePaths: ['/tmp/staged/img1.jpg'],
@@ -2421,9 +2421,9 @@ describe('App', () => {
       });
       await act(async () => {});
 
-      // ask_ollama should be called with empty message but imagePaths
+      // ask_ai should be called with empty message but imagePaths
       expect(invoke).toHaveBeenCalledWith(
-        'ask_ollama',
+        'ask_ai',
         expect.objectContaining({
           message: '',
           imagePaths: ['/tmp/staged/img1.jpg'],
@@ -3072,7 +3072,7 @@ describe('App', () => {
               ollamaReachable: true,
             };
           if (args && 'onEvent' in args) {
-            // Accept channel for ask_ollama
+            // Accept channel for ask_ai
           }
           if (cmd === 'save_image_command') {
             const p = new Promise<string>((resolve) => {
@@ -3224,10 +3224,10 @@ describe('App', () => {
       });
 
       const calls = invoke.mock.calls.filter(
-        (c) => c[0] === 'ask_ollama' || c[0] === 'search_pipeline',
+        (c) => c[0] === 'ask_ai' || c[0] === 'search_pipeline',
       );
       const last = calls[calls.length - 1];
-      expect(last[0]).toBe('ask_ollama');
+      expect(last[0]).toBe('ask_ai');
       expect(last[1]).toMatchObject({ message: 'hello' });
     });
 
@@ -3305,8 +3305,8 @@ describe('App', () => {
         screen.getByRole('list', { name: /attached images/i }),
       ).toBeInTheDocument();
 
-      // ask_ollama should never have been called
-      expect(invoke).not.toHaveBeenCalledWith('ask_ollama', expect.anything());
+      // ask_ai should never have been called
+      expect(invoke).not.toHaveBeenCalledWith('ask_ai', expect.anything());
     });
 
     it('waits for all images before firing deferred submit', async () => {
@@ -3466,8 +3466,8 @@ describe('App', () => {
         ).toBeNull();
       });
 
-      // ask_ollama should never have been called
-      expect(invoke).not.toHaveBeenCalledWith('ask_ollama', expect.anything());
+      // ask_ai should never have been called
+      expect(invoke).not.toHaveBeenCalledWith('ask_ai', expect.anything());
 
       // The "Processing images" button should be gone - back to normal send
       expect(
@@ -3579,9 +3579,9 @@ describe('App', () => {
       expect(screen.getByTestId('capability-mismatch-strip')).toHaveTextContent(
         'llama3 reads text only',
       );
-      // ask_ollama is NOT invoked.
+      // ask_ai is NOT invoked.
       const askInvocations = invoke.mock.calls.filter(
-        (call) => call[0] === 'ask_ollama',
+        (call) => call[0] === 'ask_ai',
       );
       expect(askInvocations.length).toBe(0);
       // Compose state survives.
@@ -3871,7 +3871,7 @@ describe('App', () => {
 
       expect(invoke).toHaveBeenCalledWith('capture_full_screen_command');
       expect(invoke).toHaveBeenCalledWith(
-        'ask_ollama',
+        'ask_ai',
         expect.objectContaining({
           imagePaths: ['/tmp/screen.jpg'],
           message: '/screen',
@@ -3902,7 +3902,7 @@ describe('App', () => {
       await act(async () => {});
 
       expect(invoke).toHaveBeenCalledWith(
-        'ask_ollama',
+        'ask_ai',
         expect.objectContaining({
           message: '/screen what is this error?',
           imagePaths: ['/tmp/screen.jpg'],
@@ -3934,7 +3934,7 @@ describe('App', () => {
 
       expect(invoke).toHaveBeenCalledWith('capture_full_screen_command');
       expect(invoke).toHaveBeenCalledWith(
-        'ask_ollama',
+        'ask_ai',
         expect.objectContaining({
           message: 'hello /screen there',
           imagePaths: ['/tmp/screen.jpg'],
@@ -3973,7 +3973,7 @@ describe('App', () => {
       await act(async () => {});
 
       expect(invoke).toHaveBeenCalledWith('capture_full_screen_command');
-      expect(invoke).not.toHaveBeenCalledWith('ask_ollama', expect.anything());
+      expect(invoke).not.toHaveBeenCalledWith('ask_ai', expect.anything());
       // The actual Rust error message is surfaced directly.
       expect(screen.getByText('Permission denied')).toBeInTheDocument();
     });
@@ -4132,7 +4132,7 @@ describe('App', () => {
 
         expect(invoke).toHaveBeenCalledWith('capture_full_screen_command');
         expect(invoke).toHaveBeenCalledWith(
-          'ask_ollama',
+          'ask_ai',
           expect.objectContaining({
             message: '/screen describe',
             imagePaths: ['/tmp/attached.jpg', '/tmp/screen.jpg'],
@@ -4171,7 +4171,7 @@ describe('App', () => {
       await act(async () => {});
 
       expect(invoke).toHaveBeenCalledWith(
-        'ask_ollama',
+        'ask_ai',
         expect.objectContaining({
           message: '/screen explain',
           quotedText: 'some context',
@@ -4211,9 +4211,9 @@ describe('App', () => {
       });
       await act(async () => {});
 
-      // After capture resolves: ask_ollama should be called
+      // After capture resolves: ask_ai should be called
       expect(invoke).toHaveBeenCalledWith(
-        'ask_ollama',
+        'ask_ai',
         expect.objectContaining({ message: '/screen check this' }),
       );
     });
@@ -4256,7 +4256,7 @@ describe('App', () => {
 
     it('uses blobUrl for still-processing attached images in the pending bubble', async () => {
       // save_image_command never resolves: image stays in null-filePath state.
-      // Use enableChannelCaptureWithResponses so channel capture (for ask_ollama)
+      // Use enableChannelCaptureWithResponses so channel capture (for ask_ai)
       // still works alongside the custom per-command responses.
       enableChannelCaptureWithResponses({
         save_image_command: new Promise<string>(() => {}),
@@ -4287,11 +4287,11 @@ describe('App', () => {
       });
       await act(async () => {});
 
-      // Capture succeeded; ask_ollama called with only the screenshot
+      // Capture succeeded; ask_ai called with only the screenshot
       // (the attached image never resolved its filePath)
       expect(invoke).toHaveBeenCalledWith('capture_full_screen_command');
       expect(invoke).toHaveBeenCalledWith(
-        'ask_ollama',
+        'ask_ai',
         expect.objectContaining({
           imagePaths: ['/tmp/screen.jpg'],
         }),
@@ -4332,15 +4332,15 @@ describe('App', () => {
       });
       await act(async () => {});
 
-      // ask_ollama must NOT be called since the user cancelled
-      expect(invoke).not.toHaveBeenCalledWith('ask_ollama', expect.anything());
+      // ask_ai must NOT be called since the user cancelled
+      expect(invoke).not.toHaveBeenCalledWith('ask_ai', expect.anything());
     });
   });
 
   // ─── /think command ─────────────────────────────────────────────────────────
 
   describe('/think command', () => {
-    it('sends think:true to ask_ollama and keeps /think prefix in message', async () => {
+    it('sends think:true to ask_ai and keeps /think prefix in message', async () => {
       enableChannelCapture();
 
       render(<App />);
@@ -4361,7 +4361,7 @@ describe('App', () => {
       await act(async () => {});
 
       expect(invoke).toHaveBeenCalledWith(
-        'ask_ollama',
+        'ask_ai',
         expect.objectContaining({
           message: '/think why is the sky blue?',
           think: true,
@@ -4429,7 +4429,7 @@ describe('App', () => {
 
       await act(async () => {});
 
-      expect(invoke).not.toHaveBeenCalledWith('ask_ollama', expect.anything());
+      expect(invoke).not.toHaveBeenCalledWith('ask_ai', expect.anything());
     });
 
     it('detects /think anywhere in the message, not just at start', async () => {
@@ -4453,7 +4453,7 @@ describe('App', () => {
       await act(async () => {});
 
       expect(invoke).toHaveBeenCalledWith(
-        'ask_ollama',
+        'ask_ai',
         expect.objectContaining({
           message: 'hello /think world',
           think: true,
@@ -4482,7 +4482,7 @@ describe('App', () => {
       await act(async () => {});
 
       expect(invoke).toHaveBeenCalledWith(
-        'ask_ollama',
+        'ask_ai',
         expect.objectContaining({
           message: '/think explain this code',
           quotedText: 'some selected text',
@@ -4510,7 +4510,7 @@ describe('App', () => {
       await act(async () => {});
 
       // "/think " with only a space after prefix, no actual query, no images => no submit
-      expect(invoke).not.toHaveBeenCalledWith('ask_ollama', expect.anything());
+      expect(invoke).not.toHaveBeenCalledWith('ask_ai', expect.anything());
     });
   });
 
@@ -4541,7 +4541,7 @@ describe('App', () => {
 
       expect(invoke).toHaveBeenCalledWith('capture_full_screen_command');
       expect(invoke).toHaveBeenCalledWith(
-        'ask_ollama',
+        'ask_ai',
         expect.objectContaining({
           message: '/screen /think explain this',
           imagePaths: ['/tmp/screen.jpg'],
@@ -4574,7 +4574,7 @@ describe('App', () => {
 
       expect(invoke).toHaveBeenCalledWith('capture_full_screen_command');
       expect(invoke).toHaveBeenCalledWith(
-        'ask_ollama',
+        'ask_ai',
         expect.objectContaining({
           message: '/think /screen explain this',
           imagePaths: ['/tmp/screen.jpg'],
@@ -4587,7 +4587,7 @@ describe('App', () => {
   // ─── Utility commands ───────────────────────────────────────────────────────
 
   describe('Utility commands (buildPrompt routing)', () => {
-    it('routes /rewrite command through buildPrompt and calls ask_ollama with composed prompt', async () => {
+    it('routes /rewrite command through buildPrompt and calls ask_ai with composed prompt', async () => {
       enableChannelCapture();
 
       render(<App />);
@@ -4610,7 +4610,7 @@ describe('App', () => {
       await vi.waitFor(() => {
         const askCall = vi
           .mocked(invoke)
-          .mock.calls.find((c) => c[0] === 'ask_ollama');
+          .mock.calls.find((c) => c[0] === 'ask_ai');
         expect(askCall).toBeDefined();
         const args = askCall![1] as Record<string, unknown>;
         expect(args.message).toContain('Please help rewrite the text below');
@@ -4641,7 +4641,7 @@ describe('App', () => {
       await vi.waitFor(() => {
         const askCall = vi
           .mocked(invoke)
-          .mock.calls.find((c) => c[0] === 'ask_ollama');
+          .mock.calls.find((c) => c[0] === 'ask_ai');
         expect(askCall).toBeDefined();
         const args = askCall![1] as Record<string, unknown>;
         expect(args.message).toContain('Target language: jpn');
@@ -4672,7 +4672,7 @@ describe('App', () => {
       await vi.waitFor(() => {
         const askCall = vi
           .mocked(invoke)
-          .mock.calls.find((c) => c[0] === 'ask_ollama');
+          .mock.calls.find((c) => c[0] === 'ask_ai');
         expect(askCall).toBeDefined();
         const args = askCall![1] as Record<string, unknown>;
         expect(args.message).toContain('Summarize the following text');
@@ -4681,7 +4681,7 @@ describe('App', () => {
       });
     });
 
-    it('utility command with no input text does not call ask_ollama', async () => {
+    it('utility command with no input text does not call ask_ai', async () => {
       enableChannelCapture();
 
       render(<App />);
@@ -4699,7 +4699,7 @@ describe('App', () => {
 
       await act(async () => {});
 
-      expect(invoke).not.toHaveBeenCalledWith('ask_ollama', expect.anything());
+      expect(invoke).not.toHaveBeenCalledWith('ask_ai', expect.anything());
     });
 
     it('utility command returns null composedPrompt when no usable input is found', async () => {
@@ -4723,7 +4723,7 @@ describe('App', () => {
 
       await act(async () => {});
 
-      expect(invoke).not.toHaveBeenCalledWith('ask_ollama', expect.anything());
+      expect(invoke).not.toHaveBeenCalledWith('ask_ai', expect.anything());
     });
 
     it('utility command uses selected context when available', async () => {
@@ -4752,7 +4752,7 @@ describe('App', () => {
       await vi.waitFor(() => {
         const askCall = vi
           .mocked(invoke)
-          .mock.calls.find((c) => c[0] === 'ask_ollama');
+          .mock.calls.find((c) => c[0] === 'ask_ai');
         expect(askCall).toBeDefined();
         const args = askCall![1] as Record<string, unknown>;
         expect(args.message).toContain('Please help rewrite the text below');
@@ -4806,7 +4806,7 @@ describe('App', () => {
       await vi.waitFor(() => {
         const askCall = vi
           .mocked(invoke)
-          .mock.calls.find((c) => c[0] === 'ask_ollama');
+          .mock.calls.find((c) => c[0] === 'ask_ai');
         expect(askCall).toBeDefined();
         const args = askCall![1] as Record<string, unknown>;
         // The prompt should use selectedContext as $INPUT
@@ -4888,7 +4888,7 @@ describe('App', () => {
       await vi.waitFor(() => {
         const askCall = vi
           .mocked(invoke)
-          .mock.calls.find((c) => c[0] === 'ask_ollama');
+          .mock.calls.find((c) => c[0] === 'ask_ai');
         expect(askCall).toBeDefined();
         const args = askCall![1] as Record<string, unknown>;
         expect(args.message).toContain('Please help rewrite the text below');
@@ -4913,7 +4913,7 @@ describe('App', () => {
               ollamaReachable: true,
             };
           if (args && 'onEvent' in args) {
-            // Accept channel for ask_ollama
+            // Accept channel for ask_ai
           }
           if (cmd === 'save_image_command') {
             const p = new Promise<string>((resolve) => {
@@ -5139,7 +5139,7 @@ describe('App', () => {
       });
     });
 
-    it('drops searchActive after a final Token+Done turn so the next submit uses ask_ollama', async () => {
+    it('drops searchActive after a final Token+Done turn so the next submit uses ask_ai', async () => {
       enableChannelCapture();
       render(<App />);
       await act(async () => {});
@@ -5172,10 +5172,10 @@ describe('App', () => {
       });
 
       const calls = invoke.mock.calls.filter(
-        (c) => c[0] === 'ask_ollama' || c[0] === 'search_pipeline',
+        (c) => c[0] === 'ask_ai' || c[0] === 'search_pipeline',
       );
       const last = calls[calls.length - 1];
-      expect(last[0]).toBe('ask_ollama');
+      expect(last[0]).toBe('ask_ai');
       expect(last[1]).toMatchObject({ message: 'hello' });
     });
 

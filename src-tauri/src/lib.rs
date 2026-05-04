@@ -18,6 +18,7 @@
 pub mod commands;
 pub mod config;
 pub mod database;
+pub mod engine;
 pub mod history;
 pub mod images;
 pub mod models;
@@ -40,11 +41,13 @@ use std::sync::{
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager, RunEvent, WebviewWindow,
+    Emitter, Manager, RunEvent,
 };
 
 #[cfg(target_os = "macos")]
 use tauri::ActivationPolicy;
+#[cfg(target_os = "macos")]
+use tauri::WebviewWindow;
 
 #[cfg(target_os = "macos")]
 use tauri_nspanel::{CollectionBehavior, ManagerExt, PanelLevel, StyleMask, WebviewWindowExt};
@@ -115,7 +118,9 @@ const ONBOARDING_EVENT: &str = "thuki://onboarding";
 /// Logical dimensions of the onboarding window (centered, fixed size).
 /// Content fits tightly; native macOS shadow is re-enabled for onboarding
 /// so it renders outside the window boundary without extra transparent padding.
+#[cfg(any(target_os = "macos", test))]
 const ONBOARDING_LOGICAL_WIDTH: f64 = 460.0;
+#[cfg(any(target_os = "macos", test))]
 const ONBOARDING_LOGICAL_HEIGHT: f64 = 640.0;
 
 /// Tracks the intended visibility state of the overlay, preventing race conditions
@@ -503,6 +508,9 @@ fn notify_overlay_hidden(generation: tauri::State<crate::commands::GenerationSta
 #[tauri::command]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn notify_frontend_ready(app_handle: tauri::AppHandle, db: tauri::State<history::Database>) {
+    #[cfg(not(target_os = "macos"))]
+    let _ = &db;
+
     if LAUNCH_SHOW_PENDING.swap(false, Ordering::SeqCst) {
         #[cfg(target_os = "macos")]
         {
@@ -820,12 +828,11 @@ fn spawn_periodic_image_cleanup(app_handle: tauri::AppHandle) {
 /// Panics if the Tauri runtime fails to initialise.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let mut builder = tauri::Builder::default();
-
     #[cfg(target_os = "macos")]
-    {
-        builder = builder.plugin(tauri_nspanel::init());
-    }
+    let builder = tauri::Builder::default().plugin(tauri_nspanel::init());
+
+    #[cfg(not(target_os = "macos"))]
+    let builder = tauri::Builder::default();
 
     builder
         .setup(|app| {
@@ -948,7 +955,11 @@ pub fn run() {
             // (every Ollama call, every search call) take cheap clones via
             // `state.read().clone()`. Parking_lot avoids std::sync poisoning
             // on writer panic. See design doc P10.
+            let app_config_for_engine = app_config.clone();
             app.manage(parking_lot::RwLock::new(app_config));
+            app.manage(engine::EngineClient);
+            app.manage(engine::EngineSupervisor::default());
+            engine::spawn_managed_engine(app.handle().clone(), app_config_for_engine);
 
             // ── Generation + conversation state ─────────────────────
             app.manage(commands::GenerationState::new());
@@ -995,6 +1006,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             #[cfg(not(coverage))]
+            commands::ask_ai,
+            #[cfg(not(coverage))]
             commands::ask_ollama,
             #[cfg(not(coverage))]
             commands::cancel_generation,
@@ -1004,10 +1017,15 @@ pub fn run() {
             search::search_pipeline,
             #[cfg(not(coverage))]
             commands::reset_conversation,
+            #[cfg(not(coverage))]
             settings_commands::get_config,
+            #[cfg(not(coverage))]
             settings_commands::set_config_field,
+            #[cfg(not(coverage))]
             settings_commands::reset_config,
+            #[cfg(not(coverage))]
             settings_commands::reload_config_from_disk,
+            #[cfg(not(coverage))]
             settings_commands::get_corrupt_marker,
             #[cfg(not(coverage))]
             settings_commands::reveal_config_in_finder,
@@ -1019,6 +1037,8 @@ pub fn run() {
             models::check_model_setup,
             #[cfg(not(coverage))]
             models::get_model_capabilities,
+            #[cfg(not(coverage))]
+            engine::get_engine_status,
             #[cfg(not(coverage))]
             history::save_conversation,
             #[cfg(not(coverage))]

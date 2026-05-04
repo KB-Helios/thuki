@@ -29,6 +29,7 @@ coverage
 
 # Rust build output
 target/
+src-tauri/binaries/ai-engine-server-*
 
 # Python dev environments (reader sandbox pytest venv, etc.)
 .venv/

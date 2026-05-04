@@ -136,6 +136,36 @@ pub const BOUNDS_SEARXNG_MAX_RESULTS: (u32, u32) = (1, 20);
 /// slow service.
 pub const BOUNDS_TIMEOUT_S: (u64, u64) = (1, 300);
 
+/// rag-engine integration defaults. Thuki owns the Go control plane in managed
+/// mode; that control plane supervises the Rust daemon and exposes the stable
+/// desktop gRPC contract on loopback.
+pub const DEFAULT_ENGINE_ENABLED: bool = true;
+pub const DEFAULT_ENGINE_MODE: &str = "managed";
+pub const DEFAULT_ENGINE_GRPC_URL: &str = "http://127.0.0.1:50051";
+pub const DEFAULT_ENGINE_HTTP_URL: &str = "http://127.0.0.1:8080";
+pub const DEFAULT_ENGINE_STARTUP_TIMEOUT_S: u64 = 30;
+pub const DEFAULT_ENGINE_CONTEXT_TOP_K: u32 = 5;
+pub const DEFAULT_ENGINE_FALLBACK_TO_OLLAMA: bool = true;
+pub const DEFAULT_ENGINE_HOST: &str = "127.0.0.1";
+pub const DEFAULT_ENGINE_HTTP_PORT: u16 = 8080;
+pub const DEFAULT_ENGINE_GRPC_PORT: u16 = 50051;
+pub const DEFAULT_ENGINE_DAEMON_PORT: u16 = 50061;
+pub const DEFAULT_CONTEXT_SERVICE_PORT: u16 = 9191;
+pub const DEFAULT_ENGINE_HISTORY_WINDOW_TURNS: usize = 12;
+pub const DEFAULT_ENGINE_LOCAL_CONTEXT_MAX_SNIPPET_CHARS: usize = 900;
+pub const DEFAULT_ENGINE_RUNTIME_TEMPERATURE: &str = "1.0";
+pub const DEFAULT_ENGINE_RUNTIME_TOP_P: &str = "0.95";
+pub const DEFAULT_ENGINE_RUNTIME_TOP_K: &str = "64";
+
+/// Accepted engine startup timeout range. The lower bound catches accidental
+/// zero-second startups; the upper bound keeps a wedged sidecar from blocking
+/// launch for more than five minutes.
+pub const BOUNDS_ENGINE_STARTUP_TIMEOUT_S: (u64, u64) = (1, 300);
+
+/// Accepted RAG context result count. Zero is allowed as an explicit "stream
+/// through the engine without local-context augmentation" escape hatch.
+pub const BOUNDS_ENGINE_CONTEXT_TOP_K: (u32, u32) = (0, 20);
+
 // Ollama API baked-in limits: not exposed in config.toml because they bound
 // attacker-controlled data (response bodies from the local Ollama daemon) and
 // keep the UI responsive when the daemon is hung. Changing either timeout
@@ -210,11 +240,20 @@ pub const ALLOWED_FIELDS: &[(&str, &str)] = &[
     ("search", "reader_batch_timeout_s"),
     ("search", "judge_timeout_s"),
     ("search", "router_timeout_s"),
+    // [engine]
+    ("engine", "enabled"),
+    ("engine", "mode"),
+    ("engine", "grpc_url"),
+    ("engine", "http_url"),
+    ("engine", "startup_timeout_s"),
+    ("engine", "context_top_k"),
+    ("engine", "fallback_to_ollama"),
 ];
 
 /// Authoritative allowlist of section names accepted by `reset_config`.
 /// Mirrors the top-level structure of `AppConfig`.
-pub const ALLOWED_SECTIONS: &[&str] = &["inference", "prompt", "window", "quote", "search"];
+pub const ALLOWED_SECTIONS: &[&str] =
+    &["inference", "prompt", "window", "quote", "search", "engine"];
 
 /// Special turn-boundary tokens used by the major Ollama-served model families.
 /// Ollama normally parses these out of `/api/chat` responses, but some fine-tunes

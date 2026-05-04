@@ -11,12 +11,15 @@
 //! of what the user expects. `AppConfig` itself uses `#[derive(Default)]`
 //! because it delegates entirely to each section's own `Default` impl.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::defaults::{
-    DEFAULT_JUDGE_TIMEOUT_S, DEFAULT_KEEP_WARM_INACTIVITY_MINUTES, DEFAULT_MAX_CHAT_HEIGHT,
-    DEFAULT_MAX_IMAGES, DEFAULT_MAX_ITERATIONS, DEFAULT_NUM_CTX, DEFAULT_OLLAMA_URL,
-    DEFAULT_OVERLAY_WIDTH, DEFAULT_QUOTE_MAX_CONTEXT_LENGTH, DEFAULT_QUOTE_MAX_DISPLAY_CHARS,
+    DEFAULT_ENGINE_CONTEXT_TOP_K, DEFAULT_ENGINE_ENABLED, DEFAULT_ENGINE_FALLBACK_TO_OLLAMA,
+    DEFAULT_ENGINE_GRPC_URL, DEFAULT_ENGINE_HTTP_URL, DEFAULT_ENGINE_MODE,
+    DEFAULT_ENGINE_STARTUP_TIMEOUT_S, DEFAULT_JUDGE_TIMEOUT_S,
+    DEFAULT_KEEP_WARM_INACTIVITY_MINUTES, DEFAULT_MAX_CHAT_HEIGHT, DEFAULT_MAX_IMAGES,
+    DEFAULT_MAX_ITERATIONS, DEFAULT_NUM_CTX, DEFAULT_OLLAMA_URL, DEFAULT_OVERLAY_WIDTH,
+    DEFAULT_QUOTE_MAX_CONTEXT_LENGTH, DEFAULT_QUOTE_MAX_DISPLAY_CHARS,
     DEFAULT_QUOTE_MAX_DISPLAY_LINES, DEFAULT_READER_BATCH_TIMEOUT_S,
     DEFAULT_READER_PER_URL_TIMEOUT_S, DEFAULT_READER_URL, DEFAULT_ROUTER_TIMEOUT_S,
     DEFAULT_SEARCH_TIMEOUT_S, DEFAULT_SEARXNG_MAX_RESULTS, DEFAULT_SEARXNG_URL, DEFAULT_TOP_K_URLS,
@@ -186,6 +189,71 @@ impl Default for SearchSection {
     }
 }
 
+/// rag-engine sidecar and desktop gRPC integration configuration.
+///
+/// In `managed` mode Thuki starts the bundled Go control plane and waits for
+/// gRPC readiness. `external` keeps the same gRPC contract but assumes the
+/// user or a developer process owns the engine lifecycle. The HTTP URL is not
+/// used for chat inference; it is retained for diagnostics and readiness UI.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct EngineSection {
+    /// Enables rag-engine as the primary backend for normal text chat.
+    pub enabled: bool,
+    /// Engine lifecycle mode. Supported values: `managed` or `external`.
+    pub mode: String,
+    /// gRPC endpoint for Runtime, Rag, and Context services.
+    pub grpc_url: String,
+    /// HTTP endpoint for diagnostics and readiness only.
+    pub http_url: String,
+    /// Seconds Thuki waits for the managed sidecar to become ready.
+    #[serde(deserialize_with = "deserialize_engine_startup_timeout_s")]
+    pub startup_timeout_s: u64,
+    /// Number of local RAG results prepended to normal text chat.
+    #[serde(deserialize_with = "deserialize_engine_context_top_k")]
+    pub context_top_k: u32,
+    /// Falls back to Ollama when engine startup or routing fails.
+    pub fallback_to_ollama: bool,
+}
+
+fn deserialize_engine_startup_timeout_s<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = i64::deserialize(deserializer)?;
+    if raw < 0 {
+        Ok(DEFAULT_ENGINE_STARTUP_TIMEOUT_S)
+    } else {
+        Ok(raw as u64)
+    }
+}
+
+fn deserialize_engine_context_top_k<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = i64::deserialize(deserializer)?;
+    if raw < 0 || raw > u32::MAX as i64 {
+        Ok(DEFAULT_ENGINE_CONTEXT_TOP_K)
+    } else {
+        Ok(raw as u32)
+    }
+}
+
+impl Default for EngineSection {
+    fn default() -> Self {
+        Self {
+            enabled: DEFAULT_ENGINE_ENABLED,
+            mode: DEFAULT_ENGINE_MODE.to_string(),
+            grpc_url: DEFAULT_ENGINE_GRPC_URL.to_string(),
+            http_url: DEFAULT_ENGINE_HTTP_URL.to_string(),
+            startup_timeout_s: DEFAULT_ENGINE_STARTUP_TIMEOUT_S,
+            context_top_k: DEFAULT_ENGINE_CONTEXT_TOP_K,
+            fallback_to_ollama: DEFAULT_ENGINE_FALLBACK_TO_OLLAMA,
+        }
+    }
+}
+
 /// Top-level application configuration. Managed Tauri state; every subsystem
 /// reads from `State<RwLock<AppConfig>>` and nowhere else. The loader resolves all
 /// empty strings and out-of-bounds numerics to compiled defaults before the
@@ -198,4 +266,5 @@ pub struct AppConfig {
     pub window: WindowSection,
     pub quote: QuoteSection,
     pub search: SearchSection,
+    pub engine: EngineSection,
 }

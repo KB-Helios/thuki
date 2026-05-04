@@ -271,7 +271,8 @@ mod tests {
         assert!(Path::new(&path).exists());
         assert!(path.ends_with(".jpg"));
         // File should be in the flat images/ directory, not a subdirectory.
-        assert!(path.contains("/images/"));
+        let saved_path = PathBuf::from(&path);
+        assert_eq!(saved_path.parent(), Some(images_root(&base).as_path()));
 
         fs::remove_dir_all(&base).unwrap();
     }

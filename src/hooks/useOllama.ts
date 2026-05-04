@@ -16,6 +16,12 @@ export type OllamaErrorKind =
   | 'NoModelSelected'
   | 'Other';
 
+export interface ContextSourcePreview {
+  title: string;
+  uri: string;
+  snippet: string;
+}
+
 /** Represents a single message in the chat thread. */
 export interface Message {
   /** Unique identifier for stable React list keys. */
@@ -40,6 +46,8 @@ export interface Message {
   fromThink?: boolean;
   /** Source links forwarded by the search pipeline. */
   searchSources?: SearchResultPreview[];
+  /** Local RAG context sources forwarded by rag-engine for normal chat turns. */
+  contextSources?: ContextSourcePreview[];
   /** Warnings emitted by the `/search` pipeline during this turn. */
   searchWarnings?: SearchWarning[];
   /** When true, renders sandbox setup guidance instead of normal content. */
@@ -54,6 +62,7 @@ export interface Message {
 type RawStreamChunk =
   | { type: 'Token'; data: string }
   | { type: 'ThinkingToken'; data: string }
+  | { type: 'ContextSources'; data: ContextSourcePreview[] }
   | { type: 'Done' }
   | { type: 'Cancelled' }
   | { type: 'Error'; data: { kind: OllamaErrorKind; message: string } };
@@ -68,6 +77,7 @@ type RawStreamChunk =
 type StreamChunk =
   | { type: 'Token'; content: string }
   | { type: 'ThinkingToken'; content: string }
+  | { type: 'ContextSources'; results: ContextSourcePreview[] }
   | { type: 'Done' }
   | { type: 'Cancelled' }
   | { type: 'Error'; error: { kind: OllamaErrorKind; message: string } };
@@ -78,6 +88,8 @@ function normalizeStreamChunk(chunk: RawStreamChunk): StreamChunk {
       return { type: 'Token', content: chunk.data };
     case 'ThinkingToken':
       return { type: 'ThinkingToken', content: chunk.data };
+    case 'ContextSources':
+      return { type: 'ContextSources', results: chunk.data };
     case 'Done':
       return chunk;
     case 'Cancelled':
@@ -247,6 +259,7 @@ export function useOllama(
       const channel = new Channel<RawStreamChunk>();
       let currentContent = '';
       let currentThinkingContent = '';
+      let currentContextSources: ContextSourcePreview[] | undefined;
 
       channel.onmessage = (rawChunk) => {
         if (!isActiveGeneration(generationId)) {
@@ -285,6 +298,19 @@ export function useOllama(
           return;
         }
 
+        if (chunk.type === 'ContextSources') {
+          currentContextSources =
+            chunk.results.length > 0 ? chunk.results : undefined;
+          setMessages((prev) =>
+            prev.map((message) =>
+              message.id === assistantId
+                ? { ...message, contextSources: currentContextSources }
+                : message,
+            ),
+          );
+          return;
+        }
+
         if (chunk.type === 'Done') {
           completeGeneration();
           setIsGenerating(false);
@@ -293,6 +319,7 @@ export function useOllama(
             ...assistantMsg,
             content: currentContent,
             thinkingContent: currentThinkingContent || undefined,
+            contextSources: currentContextSources,
           });
           return;
         }
@@ -327,7 +354,7 @@ export function useOllama(
       };
 
       try {
-        await invoke('ask_ollama', {
+        await invoke('ask_ai', {
           message: promptOverride ?? displayContent,
           quotedText: quotedText ?? null,
           imagePaths: imagePaths && imagePaths.length > 0 ? imagePaths : null,

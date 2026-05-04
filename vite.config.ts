@@ -13,6 +13,16 @@ export default defineConfig(async () => ({
   build: {
     chunkSizeWarningLimit: 950,
     rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [
+            {
+              name: 'vendor',
+              test: /[\\/]node_modules[\\/]/,
+            },
+          ],
+        },
+      },
       checks: {
         pluginTimings: false,
       },

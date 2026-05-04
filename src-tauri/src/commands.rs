@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use futures_util::StreamExt;
@@ -6,8 +6,14 @@ use serde::{Deserialize, Serialize};
 use tauri::{ipc::Channel, State};
 use tokio_util::sync::CancellationToken;
 
-use crate::config::defaults::STRIP_PATTERNS;
+use crate::config::defaults::{
+    DEFAULT_ENGINE_HISTORY_WINDOW_TURNS, DEFAULT_ENGINE_MODE, STRIP_PATTERNS,
+};
 use crate::config::AppConfig;
+use crate::engine::{
+    build_augmented_prompt, should_fallback_to_ollama, should_route_to_engine,
+    ContextSourcePreview, EngineClient, EngineInferenceParams, EngineStreamEvent, EngineSupervisor,
+};
 use crate::models::{Capabilities, ModelCapabilitiesCache};
 
 /// Removes special turn-boundary tokens (see [`STRIP_PATTERNS`]) and ASCII
@@ -203,6 +209,8 @@ pub enum StreamChunk {
     Token(String),
     /// A single thinking/reasoning token chunk string.
     ThinkingToken(String),
+    /// Local RAG context sources used to augment the current response.
+    ContextSources(Vec<ContextSourcePreview>),
     /// Indicates the stream has fully completed.
     Done,
     /// The user explicitly cancelled generation.
@@ -337,6 +345,41 @@ impl ConversationHistory {
 // commands share one module. The Settings panel uses the same command via
 // `invoke('get_config')`; this is the single source of truth across the app.
 
+pub fn has_attached_images(image_paths: Option<&[String]>) -> bool {
+    image_paths
+        .map(|paths| paths.iter().any(|path| !path.trim().is_empty()))
+        .unwrap_or(false)
+}
+
+pub fn build_engine_prompt_from_history(history: &[ChatMessage], current_message: &str) -> String {
+    if history.is_empty() {
+        return current_message.to_string();
+    }
+
+    let mut prompt = String::from("Conversation so far:\n");
+    let start_index = history
+        .len()
+        .saturating_sub(DEFAULT_ENGINE_HISTORY_WINDOW_TURNS);
+    for message in &history[start_index..] {
+        let role = if message.role == "assistant" {
+            "Assistant"
+        } else {
+            "User"
+        };
+        prompt.push_str(role);
+        prompt.push_str(":\n");
+        prompt.push_str(message.content.trim());
+        prompt.push_str("\n\n");
+    }
+    prompt.push_str("Current request:\n");
+    prompt.push_str(current_message);
+    prompt
+}
+
+pub fn engine_session_id(epoch: u64) -> String {
+    format!("thuki-overlay-{epoch}")
+}
+
 /// Core streaming logic for Ollama `/api/chat`, separated from the Tauri
 /// command for testability. Uses `tokio::select!` to race each chunk read
 /// against the cancellation token, ensuring the HTTP connection is dropped
@@ -461,6 +504,242 @@ pub async fn stream_ollama_chat(
     }
 
     accumulated
+}
+
+/// Engine-first chat command. Plain text turns route to rag-engine when
+/// configured and healthy; image, screenshot, and thinking-mode turns retain
+/// the existing Ollama behavior for v1 compatibility.
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[cfg_attr(not(coverage), tauri::command)]
+#[allow(clippy::too_many_arguments)]
+pub async fn ask_ai(
+    message: String,
+    quoted_text: Option<String>,
+    image_paths: Option<Vec<String>>,
+    think: bool,
+    on_event: Channel<StreamChunk>,
+    client: State<'_, reqwest::Client>,
+    generation: State<'_, GenerationState>,
+    history: State<'_, ConversationHistory>,
+    config: State<'_, parking_lot::RwLock<AppConfig>>,
+    active_model: State<'_, crate::models::ActiveModelState>,
+    capabilities_cache: State<'_, ModelCapabilitiesCache>,
+    engine_client: State<'_, EngineClient>,
+    engine_supervisor: State<'_, EngineSupervisor>,
+) -> Result<(), String> {
+    let config_snapshot = config.read().clone();
+    let has_images = has_attached_images(image_paths.as_deref());
+
+    if !should_route_to_engine(&config_snapshot, has_images, think) {
+        return ask_ollama(
+            message,
+            quoted_text,
+            image_paths,
+            think,
+            on_event,
+            client,
+            generation,
+            history,
+            config,
+            active_model,
+            capabilities_cache,
+        )
+        .await;
+    }
+
+    let model_name = {
+        let guard = active_model.0.lock().map_err(|e| e.to_string())?;
+        guard.clone()
+    };
+    let Some(model_name) = model_name else {
+        let _ = on_event.send(StreamChunk::Error(no_model_selected_error()));
+        return Ok(());
+    };
+
+    let cancel_token = CancellationToken::new();
+    generation.set_token(cancel_token.clone());
+
+    if config_snapshot.engine.mode == DEFAULT_ENGINE_MODE && !engine_supervisor.is_running() {
+        if should_fallback_to_ollama(&config_snapshot) {
+            generation.clear_token();
+            return ask_ollama(
+                message,
+                quoted_text,
+                image_paths,
+                think,
+                on_event,
+                client,
+                generation,
+                history,
+                config,
+                active_model,
+                capabilities_cache,
+            )
+            .await;
+        }
+        let _ = on_event.send(StreamChunk::Error(OllamaError {
+            kind: OllamaErrorKind::Other,
+            message: "Engine unavailable\nrag-engine is not running.".to_string(),
+        }));
+        generation.clear_token();
+        return Ok(());
+    }
+
+    let preflight = tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => {
+            let _ = on_event.send(StreamChunk::Cancelled);
+            generation.clear_token();
+            return Ok(());
+        }
+        result = engine_client.get_status(&config_snapshot.engine.grpc_url) => result,
+    };
+
+    if let Err(err) = preflight {
+        eprintln!("thuki: [rag-engine] preflight failed: {err}");
+        if should_fallback_to_ollama(&config_snapshot) {
+            generation.clear_token();
+            return ask_ollama(
+                message,
+                quoted_text,
+                image_paths,
+                think,
+                on_event,
+                client,
+                generation,
+                history,
+                config,
+                active_model,
+                capabilities_cache,
+            )
+            .await;
+        }
+        let _ = on_event.send(StreamChunk::Error(OllamaError {
+            kind: OllamaErrorKind::Other,
+            message: "Engine unavailable\nrag-engine is not reachable.".to_string(),
+        }));
+        generation.clear_token();
+        return Ok(());
+    }
+
+    let content = match quoted_text {
+        Some(ref qt) if !qt.trim().is_empty() => {
+            format!("[Highlighted Text]\n\"{}\"\n\n[Request]\n{}", qt, message)
+        }
+        _ => message,
+    };
+
+    let user_msg = ChatMessage {
+        role: "user".to_string(),
+        content: content.clone(),
+        images: None,
+    };
+
+    let (epoch_at_start, history_snapshot) = {
+        let conv = history.messages.lock().unwrap();
+        let epoch = history.epoch.load(Ordering::SeqCst);
+        (epoch, conv.clone())
+    };
+
+    let context_sources = match tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => {
+            let _ = on_event.send(StreamChunk::Cancelled);
+            generation.clear_token();
+            return Ok(());
+        }
+        result = engine_client.search_rag(
+            &config_snapshot.engine.grpc_url,
+            &content,
+            config_snapshot.engine.context_top_k,
+        ) => result,
+    } {
+        Ok(sources) => sources,
+        Err(err) => {
+            eprintln!("thuki: [rag-engine] RAG search failed, continuing without context: {err}");
+            Vec::new()
+        }
+    };
+
+    if cancel_token.is_cancelled() {
+        let _ = on_event.send(StreamChunk::Cancelled);
+        generation.clear_token();
+        return Ok(());
+    }
+
+    if !context_sources.is_empty() {
+        let _ = on_event.send(StreamChunk::ContextSources(context_sources.clone()));
+    }
+
+    let current_with_context = build_augmented_prompt(&content, &context_sources);
+    let prompt = build_engine_prompt_from_history(&history_snapshot, &current_with_context);
+    let was_cancelled = AtomicBool::new(false);
+    let stream_result = engine_client
+        .stream_inference(
+            EngineInferenceParams {
+                grpc_url: config_snapshot.engine.grpc_url.clone(),
+                model_id: model_name,
+                prompt,
+                system_prompt: Some(config_snapshot.prompt.resolved_system.clone()),
+            },
+            cancel_token.clone(),
+            |event| {
+                let chunk = match event {
+                    EngineStreamEvent::Token(token) => StreamChunk::Token(token),
+                    EngineStreamEvent::Done => StreamChunk::Done,
+                    EngineStreamEvent::Cancelled => {
+                        was_cancelled.store(true, Ordering::SeqCst);
+                        StreamChunk::Cancelled
+                    }
+                };
+                let _ = on_event.send(chunk);
+            },
+        )
+        .await;
+
+    let accumulated = match stream_result {
+        Ok(accumulated) => accumulated,
+        Err(err) => {
+            let _ = on_event.send(StreamChunk::Error(OllamaError {
+                kind: OllamaErrorKind::Other,
+                message: format!("Engine error\n{err}"),
+            }));
+            generation.clear_token();
+            return Ok(());
+        }
+    };
+
+    let current_epoch = history.epoch.load(Ordering::SeqCst);
+    if current_epoch == epoch_at_start
+        && !accumulated.is_empty()
+        && !was_cancelled.load(Ordering::SeqCst)
+    {
+        let assistant_content = sanitize_assistant_content(&accumulated);
+        let session_id = engine_session_id(epoch_at_start);
+        {
+            let mut conv = history.messages.lock().unwrap();
+            conv.push(user_msg.clone());
+            conv.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: assistant_content.clone(),
+                images: None,
+            });
+        }
+        if let Err(err) = engine_client
+            .append_session_turns(
+                &config_snapshot.engine.grpc_url,
+                &session_id,
+                &user_msg.content,
+                &assistant_content,
+            )
+            .await
+        {
+            eprintln!("thuki: [rag-engine] Context.AppendSession failed: {err}");
+        }
+    }
+
+    generation.clear_token();
+    Ok(())
 }
 
 /// Streams a chat response from the local Ollama backend. Appends the user
@@ -1573,6 +1852,58 @@ mod tests {
         // OllamaError discriminator.
         let v = serde_json::to_value(OllamaErrorKind::NoModelSelected).unwrap();
         assert_eq!(v, serde_json::Value::String("NoModelSelected".to_string()));
+    }
+
+    #[test]
+    fn context_sources_chunk_serializes_for_frontend() {
+        let chunk = StreamChunk::ContextSources(vec![ContextSourcePreview {
+            title: "Doc".to_string(),
+            uri: "file:///doc.md".to_string(),
+            snippet: "snippet".to_string(),
+        }]);
+        let json = serde_json::to_value(&chunk).unwrap();
+        assert_eq!(json["type"], "ContextSources");
+        assert_eq!(json["data"][0]["title"], "Doc");
+        assert_eq!(json["data"][0]["uri"], "file:///doc.md");
+    }
+
+    #[test]
+    fn has_attached_images_detects_non_empty_paths() {
+        assert!(!has_attached_images(None));
+        assert!(!has_attached_images(Some(&[])));
+        assert!(!has_attached_images(Some(&["  ".to_string()])));
+        assert!(has_attached_images(Some(&["/tmp/a.png".to_string()])));
+    }
+
+    #[test]
+    fn engine_prompt_from_history_includes_recent_turns() {
+        let history = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: "hello".to_string(),
+                images: None,
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "hi".to_string(),
+                images: None,
+            },
+        ];
+        let prompt = build_engine_prompt_from_history(&history, "next");
+        assert!(prompt.contains("Conversation so far:"));
+        assert!(prompt.contains("User:\nhello"));
+        assert!(prompt.contains("Assistant:\nhi"));
+        assert!(prompt.ends_with("Current request:\nnext"));
+    }
+
+    #[test]
+    fn engine_prompt_from_history_is_noop_without_history() {
+        assert_eq!(build_engine_prompt_from_history(&[], "next"), "next");
+    }
+
+    #[test]
+    fn engine_session_id_uses_epoch_suffix() {
+        assert_eq!(engine_session_id(42), "thuki-overlay-42");
     }
 
     #[tokio::test]

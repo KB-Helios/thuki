@@ -70,6 +70,10 @@ export const NO_MODELS_INSTALLED_MESSAGE =
  */
 export const OLLAMA_UNREACHABLE_MESSAGE =
   "Ollama isn't running. Start Ollama and try again.";
+export const ENGINE_UNREACHABLE_MESSAGE =
+  "The local engine isn't running. Start the engine and try again.";
+export const NO_ENGINE_MODELS_INSTALLED_MESSAGE =
+  'Thuki could not find any local engine models. Add one, then come back.';
 
 /**
  * Picks the right environment-state message to render in
@@ -90,12 +94,21 @@ export const OLLAMA_UNREACHABLE_MESSAGE =
  * to the per-message capability check.
  */
 export function getEnvironmentMessage(
-  ollamaReachable: boolean,
+  backendReachable: boolean,
   installedCount: number,
   activeModel: string | null | undefined,
+  backend: 'engine' | 'ollama' = 'ollama',
 ): string | null {
-  if (!ollamaReachable) return OLLAMA_UNREACHABLE_MESSAGE;
-  if (installedCount === 0) return NO_MODELS_INSTALLED_MESSAGE;
+  if (!backendReachable) {
+    return backend === 'engine'
+      ? ENGINE_UNREACHABLE_MESSAGE
+      : OLLAMA_UNREACHABLE_MESSAGE;
+  }
+  if (installedCount === 0) {
+    return backend === 'engine'
+      ? NO_ENGINE_MODELS_INSTALLED_MESSAGE
+      : NO_MODELS_INSTALLED_MESSAGE;
+  }
   if (!activeModel) {
     return 'Pick a model from the chip above to start chatting.';
   }

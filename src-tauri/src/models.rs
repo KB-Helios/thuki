@@ -20,15 +20,66 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::config::defaults::{
-    DEFAULT_OLLAMA_SHOW_REQUEST_TIMEOUT_SECS, DEFAULT_OLLAMA_TAGS_REQUEST_TIMEOUT_SECS,
-    MAX_MODEL_SLUG_LEN, MAX_OLLAMA_SHOW_BODY_BYTES, MAX_OLLAMA_TAGS_BODY_BYTES,
+    DEFAULT_ENGINE_MODE, DEFAULT_OLLAMA_SHOW_REQUEST_TIMEOUT_SECS,
+    DEFAULT_OLLAMA_TAGS_REQUEST_TIMEOUT_SECS, MAX_MODEL_SLUG_LEN, MAX_OLLAMA_SHOW_BODY_BYTES,
+    MAX_OLLAMA_TAGS_BODY_BYTES,
 };
 use crate::config::AppConfig;
 use crate::database::{get_config, set_config};
+use crate::engine::{EngineClient, EngineModelPreview, EngineSupervisor};
 use crate::history::Database;
 
 /// `app_config` key used to persist the user's selected model slug.
 pub const ACTIVE_MODEL_KEY: &str = "active_model";
+
+/// Runtime configuration projection for the models subsystem.
+///
+/// Extracted from [`AppConfig`] at command entry so model-layer code does not
+/// depend on the full TOML schema. Owns only the fields actually consumed by
+/// model picker, capabilities, and setup commands.
+#[derive(Debug, Clone)]
+pub struct ModelRuntimeConfig {
+    /// Base URL of the local Ollama instance.
+    pub ollama_url: String,
+    /// Whether the rag-engine backend is enabled.
+    pub engine_enabled: bool,
+    /// Engine lifecycle mode (`managed` or `external`).
+    pub engine_mode: String,
+    /// gRPC endpoint for engine services.
+    pub engine_grpc_url: String,
+    /// Whether to fall back to Ollama when engine is unavailable.
+    pub engine_fallback_to_ollama: bool,
+}
+
+impl ModelRuntimeConfig {
+    /// Constructs the runtime config from the loaded [`AppConfig`].
+    pub fn from_app_config(cfg: &AppConfig) -> Self {
+        Self {
+            ollama_url: cfg.inference.ollama_url.clone(),
+            engine_enabled: cfg.engine.enabled,
+            engine_mode: cfg.engine.mode.clone(),
+            engine_grpc_url: cfg.engine.grpc_url.clone(),
+            engine_fallback_to_ollama: cfg.engine.fallback_to_ollama,
+        }
+    }
+
+    /// Helper to determine if engine models should be probed.
+    pub fn should_probe_engine(&self, supervisor: &EngineSupervisor) -> bool {
+        self.engine_enabled && (self.engine_mode != DEFAULT_ENGINE_MODE || supervisor.is_running())
+    }
+}
+
+impl Default for ModelRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            ollama_url: crate::config::defaults::DEFAULT_OLLAMA_URL.to_string(),
+            engine_enabled: crate::config::defaults::DEFAULT_ENGINE_ENABLED,
+            engine_mode: crate::config::defaults::DEFAULT_ENGINE_MODE.to_string(),
+            engine_grpc_url: crate::config::defaults::DEFAULT_ENGINE_GRPC_URL.to_string(),
+            engine_fallback_to_ollama: crate::config::defaults::DEFAULT_ENGINE_FALLBACK_TO_OLLAMA,
+        }
+    }
+}
 
 /// Shared error-message prefix used when a requested slug is not present in
 /// the live Ollama inventory. Exported so the frontend and tests can match
@@ -244,11 +295,73 @@ async fn fetch_installed_model_names_inner(
 #[cfg_attr(not(coverage), tauri::command)]
 pub async fn get_model_picker_state(
     client: tauri::State<'_, reqwest::Client>,
+    engine_client: tauri::State<'_, EngineClient>,
+    engine_supervisor: tauri::State<'_, EngineSupervisor>,
     db: tauri::State<'_, Database>,
     active_model: tauri::State<'_, ActiveModelState>,
     config: tauri::State<'_, parking_lot::RwLock<AppConfig>>,
 ) -> Result<serde_json::Value, String> {
-    let ollama_url = config.read().inference.ollama_url.clone();
+    let runtime_config = ModelRuntimeConfig::from_app_config(&config.read());
+    let can_probe_engine = runtime_config.should_probe_engine(&engine_supervisor);
+    if can_probe_engine {
+        match engine_client
+            .list_models(&runtime_config.engine_grpc_url)
+            .await
+        {
+            Ok(models) => {
+                let installed = engine_model_names(&models);
+                let resolved = {
+                    let conn = db.0.lock().map_err(|e| e.to_string())?;
+                    let persisted =
+                        get_config(&conn, ACTIVE_MODEL_KEY).map_err(|e| e.to_string())?;
+                    let resolved = resolve_active_model(persisted.as_deref(), &installed);
+                    if let Some(slug) = resolved.as_deref() {
+                        if should_persist_resolved(&installed, persisted.as_deref(), slug) {
+                            set_config(&conn, ACTIVE_MODEL_KEY, slug).map_err(|e| e.to_string())?;
+                        }
+                    }
+                    resolved
+                };
+
+                {
+                    let mut guard = active_model.0.lock().map_err(|e| e.to_string())?;
+                    *guard = resolved.clone();
+                }
+
+                return Ok(build_picker_state_payload_with_backend(
+                    resolved.as_deref(),
+                    &installed,
+                    "engine",
+                    true,
+                    true,
+                ));
+            }
+            Err(_) if !runtime_config.engine_fallback_to_ollama => {
+                let mut guard = active_model.0.lock().map_err(|e| e.to_string())?;
+                *guard = None;
+                return Ok(build_picker_state_payload_with_backend(
+                    None,
+                    &[],
+                    "engine",
+                    false,
+                    true,
+                ));
+            }
+            Err(_) => {}
+        }
+    } else if runtime_config.engine_enabled && !runtime_config.engine_fallback_to_ollama {
+        let mut guard = active_model.0.lock().map_err(|e| e.to_string())?;
+        *guard = None;
+        return Ok(build_picker_state_payload_with_backend(
+            None,
+            &[],
+            "engine",
+            false,
+            true,
+        ));
+    }
+
+    let ollama_url = runtime_config.ollama_url.clone();
     let fetch_result = fetch_installed_model_names(&client, &ollama_url).await;
 
     let installed = match fetch_result {
@@ -295,6 +408,22 @@ pub fn build_picker_state_payload(
     installed: &[String],
     ollama_reachable: bool,
 ) -> serde_json::Value {
+    build_picker_state_payload_with_backend(
+        active,
+        installed,
+        "ollama",
+        ollama_reachable,
+        ollama_reachable,
+    )
+}
+
+pub fn build_picker_state_payload_with_backend(
+    active: Option<&str>,
+    installed: &[String],
+    backend: &str,
+    backend_reachable: bool,
+    ollama_reachable: bool,
+) -> serde_json::Value {
     let active_value = match active {
         Some(slug) => serde_json::Value::String(slug.to_string()),
         None => serde_json::Value::Null,
@@ -302,8 +431,48 @@ pub fn build_picker_state_payload(
     serde_json::json!({
         "active": active_value,
         "all": installed,
+        "backend": backend,
+        "backendReachable": backend_reachable,
         "ollamaReachable": ollama_reachable,
     })
+}
+
+pub fn engine_model_names(models: &[EngineModelPreview]) -> Vec<String> {
+    models
+        .iter()
+        .map(|model| {
+            if model.id.is_empty() {
+                model.name.clone()
+            } else {
+                model.id.clone()
+            }
+        })
+        .filter(|model| !model.trim().is_empty())
+        .collect()
+}
+
+pub fn engine_capabilities(models: &[EngineModelPreview]) -> HashMap<String, Capabilities> {
+    models
+        .iter()
+        .filter_map(|model| {
+            let name = if model.id.is_empty() {
+                model.name.as_str()
+            } else {
+                model.id.as_str()
+            };
+            if name.trim().is_empty() {
+                return None;
+            }
+            Some((
+                name.to_string(),
+                Capabilities {
+                    vision: model.vision,
+                    thinking: model.thinking,
+                    max_images: None,
+                },
+            ))
+        })
+        .collect()
 }
 
 /// Persists `model` as the active model after validating its shape and
@@ -314,16 +483,47 @@ pub fn build_picker_state_payload(
 pub async fn set_active_model(
     model: String,
     client: tauri::State<'_, reqwest::Client>,
+    engine_client: tauri::State<'_, EngineClient>,
+    engine_supervisor: tauri::State<'_, EngineSupervisor>,
     db: tauri::State<'_, Database>,
     active_model: tauri::State<'_, ActiveModelState>,
     config: tauri::State<'_, parking_lot::RwLock<AppConfig>>,
 ) -> Result<(), String> {
     validate_model_slug(&model)?;
 
-    let ollama_url = config.read().inference.ollama_url.clone();
+    let runtime_config = ModelRuntimeConfig::from_app_config(&config.read());
+    let can_probe_engine = runtime_config.should_probe_engine(&engine_supervisor);
+    if can_probe_engine {
+        match engine_client
+            .list_models(&runtime_config.engine_grpc_url)
+            .await
+        {
+            Ok(models) => {
+                let installed = engine_model_names(&models);
+                validate_model_installed(&model, &installed)?;
+                persist_active_model(&db, &active_model, model)?;
+                return Ok(());
+            }
+            Err(_) if !runtime_config.engine_fallback_to_ollama => {
+                return Err(format!("{MODEL_NOT_INSTALLED_ERR_PREFIX}{model}"));
+            }
+            Err(_) => {}
+        }
+    } else if runtime_config.engine_enabled && !runtime_config.engine_fallback_to_ollama {
+        return Err(format!("{MODEL_NOT_INSTALLED_ERR_PREFIX}{model}"));
+    }
+
+    let ollama_url = runtime_config.ollama_url.clone();
     let installed = fetch_installed_model_names(&client, &ollama_url).await?;
     validate_model_installed(&model, &installed)?;
+    persist_active_model(&db, &active_model, model)
+}
 
+fn persist_active_model(
+    db: &Database,
+    active_model: &ActiveModelState,
+    model: String,
+) -> Result<(), String> {
     {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         set_config(&conn, ACTIVE_MODEL_KEY, &model).map_err(|e| e.to_string())?;
@@ -430,7 +630,8 @@ pub async fn check_model_setup(
     active_model: tauri::State<'_, ActiveModelState>,
     config: tauri::State<'_, parking_lot::RwLock<AppConfig>>,
 ) -> Result<ModelSetupState, String> {
-    let ollama_url = config.read().inference.ollama_url.clone();
+    let runtime_config = ModelRuntimeConfig::from_app_config(&config.read());
+    let ollama_url = runtime_config.ollama_url.clone();
     let installed_result = fetch_installed_model_names(&client, &ollama_url).await;
 
     let persisted = {
@@ -691,10 +892,27 @@ pub struct ModelCapabilitiesCache(pub Mutex<HashMap<String, Capabilities>>);
 #[cfg_attr(not(coverage), tauri::command)]
 pub async fn get_model_capabilities(
     client: tauri::State<'_, reqwest::Client>,
+    engine_client: tauri::State<'_, EngineClient>,
+    engine_supervisor: tauri::State<'_, EngineSupervisor>,
     cache: tauri::State<'_, ModelCapabilitiesCache>,
     config: tauri::State<'_, parking_lot::RwLock<AppConfig>>,
 ) -> Result<HashMap<String, Capabilities>, String> {
-    let base_url = config.read().inference.ollama_url.clone();
+    let runtime_config = ModelRuntimeConfig::from_app_config(&config.read());
+    let can_probe_engine = runtime_config.should_probe_engine(&engine_supervisor);
+    if can_probe_engine {
+        match engine_client
+            .list_models(&runtime_config.engine_grpc_url)
+            .await
+        {
+            Ok(models) => return Ok(engine_capabilities(&models)),
+            Err(_) if !runtime_config.engine_fallback_to_ollama => return Ok(HashMap::new()),
+            Err(_) => {}
+        }
+    } else if runtime_config.engine_enabled && !runtime_config.engine_fallback_to_ollama {
+        return Ok(HashMap::new());
+    }
+
+    let base_url = runtime_config.ollama_url.clone();
     let installed = fetch_installed_model_names(&client, &base_url).await?;
     Ok(reconcile_capabilities(&client, &cache, &base_url, &installed).await)
 }
@@ -772,6 +990,8 @@ mod tests {
         let payload = build_picker_state_payload(None, &[], false);
         assert_eq!(payload["active"], serde_json::Value::Null);
         assert_eq!(payload["all"], serde_json::json!([]));
+        assert_eq!(payload["backend"], serde_json::json!("ollama"));
+        assert_eq!(payload["backendReachable"], serde_json::Value::Bool(false));
         assert_eq!(payload["ollamaReachable"], serde_json::Value::Bool(false));
     }
 
@@ -783,6 +1003,8 @@ mod tests {
         let payload = build_picker_state_payload(None, &[], true);
         assert_eq!(payload["active"], serde_json::Value::Null);
         assert_eq!(payload["all"], serde_json::json!([]));
+        assert_eq!(payload["backend"], serde_json::json!("ollama"));
+        assert_eq!(payload["backendReachable"], serde_json::Value::Bool(true));
         assert_eq!(payload["ollamaReachable"], serde_json::Value::Bool(true));
     }
 
@@ -797,7 +1019,78 @@ mod tests {
             payload["all"],
             serde_json::json!(["gemma4:e2b", "gemma4:e4b"])
         );
+        assert_eq!(payload["backend"], serde_json::json!("ollama"));
+        assert_eq!(payload["backendReachable"], serde_json::Value::Bool(true));
         assert_eq!(payload["ollamaReachable"], serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn picker_payload_can_report_engine_backend_with_deprecated_ollama_alias() {
+        let installed = vec!["model.gguf".to_string()];
+        let payload = build_picker_state_payload_with_backend(
+            Some("model.gguf"),
+            &installed,
+            "engine",
+            true,
+            true,
+        );
+        assert_eq!(payload["backend"], serde_json::json!("engine"));
+        assert_eq!(payload["backendReachable"], serde_json::Value::Bool(true));
+        assert_eq!(payload["ollamaReachable"], serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn engine_model_helpers_use_id_first_and_map_capabilities() {
+        let models = vec![
+            EngineModelPreview {
+                id: "model-a.gguf".to_string(),
+                name: "Model A".to_string(),
+                loaded: true,
+                vision: true,
+                thinking: false,
+            },
+            EngineModelPreview {
+                id: String::new(),
+                name: "fallback-name.gguf".to_string(),
+                loaded: false,
+                vision: false,
+                thinking: true,
+            },
+            EngineModelPreview {
+                id: String::new(),
+                name: "   ".to_string(),
+                loaded: false,
+                vision: true,
+                thinking: true,
+            },
+        ];
+
+        assert_eq!(
+            engine_model_names(&models),
+            vec!["model-a.gguf".to_string(), "fallback-name.gguf".to_string()]
+        );
+        let capabilities = engine_capabilities(&models);
+        assert!(capabilities["model-a.gguf"].vision);
+        assert!(!capabilities["model-a.gguf"].thinking);
+        assert!(!capabilities["fallback-name.gguf"].vision);
+        assert!(capabilities["fallback-name.gguf"].thinking);
+        assert!(!capabilities.contains_key("   "));
+    }
+
+    #[test]
+    fn should_probe_engine_models_requires_enabled_engine_with_probe_signal() {
+        let supervisor = EngineSupervisor::default();
+        let mut config = AppConfig::default();
+
+        config.engine.enabled = false;
+        assert!(!should_probe_engine_models(&config, &supervisor));
+
+        config.engine.enabled = true;
+        config.engine.mode = DEFAULT_ENGINE_MODE.to_string();
+        assert!(!should_probe_engine_models(&config, &supervisor));
+
+        config.engine.mode = "external".to_string();
+        assert!(should_probe_engine_models(&config, &supervisor));
     }
 
     // ── resolve_active_model ─────────────────────────────────────────────────
@@ -1274,6 +1567,62 @@ mod tests {
         set_config(&conn, ACTIVE_MODEL_KEY, "gemma4:e4b").unwrap();
         let back = get_config(&conn, ACTIVE_MODEL_KEY).unwrap();
         assert_eq!(back.as_deref(), Some("gemma4:e4b"));
+    }
+
+    #[test]
+    fn persist_active_model_updates_database_and_memory_state() {
+        let conn = crate::database::open_in_memory().unwrap();
+        let db = Database(Mutex::new(conn));
+        let state = ActiveModelState::default();
+
+        persist_active_model(&db, &state, "gemma4:e4b".to_string()).unwrap();
+
+        let conn = db.0.lock().unwrap();
+        let persisted = get_config(&conn, ACTIVE_MODEL_KEY).unwrap();
+        drop(conn);
+        assert_eq!(persisted.as_deref(), Some("gemma4:e4b"));
+        assert_eq!(*state.0.lock().unwrap(), Some("gemma4:e4b".to_string()));
+    }
+
+    #[test]
+    fn persist_active_model_reports_database_lock_poisoning() {
+        let conn = crate::database::open_in_memory().unwrap();
+        let db = Database(Mutex::new(conn));
+        let state = ActiveModelState::default();
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = db.0.lock().unwrap();
+            panic!("poison database lock");
+        });
+
+        let err = persist_active_model(&db, &state, "gemma4:e4b".to_string()).unwrap_err();
+
+        assert!(err.contains("poison"));
+    }
+
+    #[test]
+    fn persist_active_model_reports_database_write_errors() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let db = Database(Mutex::new(conn));
+        let state = ActiveModelState::default();
+
+        let err = persist_active_model(&db, &state, "gemma4:e4b".to_string()).unwrap_err();
+
+        assert!(err.contains("app_config"));
+    }
+
+    #[test]
+    fn persist_active_model_reports_state_lock_poisoning() {
+        let conn = crate::database::open_in_memory().unwrap();
+        let db = Database(Mutex::new(conn));
+        let state = ActiveModelState::default();
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = state.0.lock().unwrap();
+            panic!("poison active-model lock");
+        });
+
+        let err = persist_active_model(&db, &state, "gemma4:e4b".to_string()).unwrap_err();
+
+        assert!(err.contains("poison"));
     }
 
     #[test]

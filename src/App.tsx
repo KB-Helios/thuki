@@ -144,7 +144,8 @@ function App() {
   const {
     activeModel,
     availableModels,
-    ollamaReachable,
+    modelBackend,
+    modelBackendReachable,
     refreshModels,
     setActiveModel,
   } = useModelSelection();
@@ -1173,9 +1174,10 @@ function App() {
 
   const liveCapabilityConflictMessage = useMemo(() => {
     const envMessage = getEnvironmentMessage(
-      ollamaReachable,
+      modelBackendReachable,
       availableModels.length,
       activeModel,
+      modelBackend,
     );
     if (envMessage !== null) return envMessage;
     return getCapabilityConflict(
@@ -1189,7 +1191,8 @@ function App() {
     historyCapabilityState,
     activeModel,
     activeModelCapabilities,
-    ollamaReachable,
+    modelBackend,
+    modelBackendReachable,
     availableModels.length,
   ]);
 
@@ -1205,9 +1208,10 @@ function App() {
    */
   const hasBlockingConflict = useMemo(() => {
     const envMessage = getEnvironmentMessage(
-      ollamaReachable,
+      modelBackendReachable,
       availableModels.length,
       activeModel,
+      modelBackend,
     );
     if (envMessage !== null) return true;
     return isComposeCapabilityConflict(
@@ -1215,7 +1219,8 @@ function App() {
       composeCapabilityState,
     );
   }, [
-    ollamaReachable,
+    modelBackend,
+    modelBackendReachable,
     availableModels.length,
     activeModel,
     activeModelCapabilities,
@@ -1787,7 +1792,9 @@ function App() {
                       searchStage={searchStage}
                       activeModel={activeModel}
                       onModelPickerToggle={
-                        ollamaReachable ? handleModelPickerToggle : undefined
+                        modelBackendReachable
+                          ? handleModelPickerToggle
+                          : undefined
                       }
                       isModelPickerOpen={isModelPickerOpen}
                     />
@@ -1798,7 +1805,7 @@ function App() {
                     In chat mode the trigger and drawer move to the header area above. */}
                 {!isChatMode && (
                   <AnimatePresence>
-                    {isModelPickerOpen && ollamaReachable ? (
+                    {isModelPickerOpen && modelBackendReachable ? (
                       <motion.div
                         ref={modelPickerAskBarRef}
                         key="model-picker-askbar"
@@ -1897,7 +1904,7 @@ function App() {
                   onScreenshot={handleScreenshot}
                   isDragOver={isDragOver ?? undefined}
                   onModelPickerToggle={
-                    ollamaReachable ? handleModelPickerToggle : undefined
+                    modelBackendReachable ? handleModelPickerToggle : undefined
                   }
                   isModelPickerOpen={isModelPickerOpen}
                   capabilityConflictMessage={liveCapabilityConflictMessage}
@@ -1932,7 +1939,7 @@ function App() {
                   so it appears just below the header pill trigger without pushing
                   the conversation content. Click-outside closes it. */}
               <AnimatePresence>
-                {isChatMode && isModelPickerOpen && ollamaReachable ? (
+                {isChatMode && isModelPickerOpen && modelBackendReachable ? (
                   <motion.div
                     ref={modelPickerDropdownRef}
                     key="model-picker-dropdown"

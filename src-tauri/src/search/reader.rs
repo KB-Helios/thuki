@@ -18,6 +18,7 @@
 //! - when the reader sidecar is unreachable entirely, we return
 //!   `ServiceUnavailable` so the pipeline can emit a warning and fall back.
 
+use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -280,11 +281,10 @@ async fn fetch_one(client: &Client, base: &str, url: &str) -> FetchOutcome {
     match res {
         Err(e) => {
             // reqwest wraps the OS-level message in source chains, so
-            // `to_string()` alone misses "Connection refused". Use
-            // `is_connect()` first (catches TCP-level failures), then fall
-            // back to the string classifier for timeout/DNS variants where
-            // `is_connect()` is false.
-            if e.is_connect() || is_transient_connect_error(&e.to_string()) {
+            // `to_string()` alone misses "Connection refused". Use typed
+            // reqwest classifiers first, then fall back to the string
+            // classifier for DNS variants and platform-specific messages.
+            if is_reader_service_unavailable_error(&e) {
                 FetchOutcome::ServiceUnavailable(url.to_string())
             } else {
                 FetchOutcome::Failed(url.to_string())
@@ -307,6 +307,28 @@ async fn fetch_one(client: &Client, base: &str, url: &str) -> FetchOutcome {
     }
 }
 
+fn is_reader_service_unavailable_error(error: &reqwest::Error) -> bool {
+    if error.is_connect() {
+        return true;
+    }
+
+    let mut source = error.source();
+    while let Some(err) = source {
+        if is_reader_service_unavailable_message(&err.to_string()) {
+            return true;
+        }
+        source = err.source();
+    }
+
+    false
+}
+
+fn is_reader_service_unavailable_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    let connect_like = is_transient_connect_error(message) || lower.contains("connection closed");
+    connect_like && !lower.contains("timeout") && !lower.contains("timed out")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,11 +337,22 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    const SERVICE_UNAVAILABLE_PER_URL_TIMEOUT_S: u64 = 1;
+    const SERVICE_UNAVAILABLE_BATCH_TIMEOUT_S: u64 = 4;
+
     async fn client_for(server: &MockServer) -> ReaderClient {
         ReaderClient::new_with_base(
             server.uri(),
             DEFAULT_READER_PER_URL_TIMEOUT_S,
             TEST_READER_BATCH_TIMEOUT_S,
+        )
+    }
+
+    fn unreachable_client() -> ReaderClient {
+        ReaderClient::new_with_base(
+            "http://0.0.0.0:1",
+            SERVICE_UNAVAILABLE_PER_URL_TIMEOUT_S,
+            SERVICE_UNAVAILABLE_BATCH_TIMEOUT_S,
         )
     }
 
@@ -391,12 +424,9 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_batch_reports_unreachable_service() {
-        // server not started; port 1 is unprivileged nothingness.
-        let client = ReaderClient::new_with_base(
-            "http://127.0.0.1:1".to_string(),
-            DEFAULT_READER_PER_URL_TIMEOUT_S,
-            TEST_READER_BATCH_TIMEOUT_S,
-        );
+        // Use an endpoint that reqwest classifies as connect-like before the
+        // batch timeout wins on Windows.
+        let client = unreachable_client();
         let res = client.fetch_batch(&["https://a.com/1".to_string()]).await;
         assert_eq!(res, Err(ReaderError::ServiceUnavailable));
     }
@@ -612,11 +642,7 @@ mod tests {
 
     #[tokio::test]
     async fn progress_reports_service_unavailable_when_all_fail_with_connect_error() {
-        let client = ReaderClient::new_with_base(
-            "http://127.0.0.1:1".to_string(),
-            DEFAULT_READER_PER_URL_TIMEOUT_S,
-            TEST_READER_BATCH_TIMEOUT_S,
-        );
+        let client = unreachable_client();
         let res = client
             .fetch_batch_with_progress(
                 &["https://a.com/1".to_string()],

@@ -13,9 +13,12 @@
 use std::path::PathBuf;
 
 use super::defaults::{
-    DEFAULT_JUDGE_TIMEOUT_S, DEFAULT_KEEP_WARM_INACTIVITY_MINUTES, DEFAULT_MAX_CHAT_HEIGHT,
-    DEFAULT_MAX_IMAGES, DEFAULT_MAX_ITERATIONS, DEFAULT_NUM_CTX, DEFAULT_OLLAMA_URL,
-    DEFAULT_OVERLAY_WIDTH, DEFAULT_QUOTE_MAX_CONTEXT_LENGTH, DEFAULT_QUOTE_MAX_DISPLAY_CHARS,
+    DEFAULT_ENGINE_CONTEXT_TOP_K, DEFAULT_ENGINE_ENABLED, DEFAULT_ENGINE_FALLBACK_TO_OLLAMA,
+    DEFAULT_ENGINE_GRPC_URL, DEFAULT_ENGINE_HTTP_URL, DEFAULT_ENGINE_MODE,
+    DEFAULT_ENGINE_STARTUP_TIMEOUT_S, DEFAULT_JUDGE_TIMEOUT_S,
+    DEFAULT_KEEP_WARM_INACTIVITY_MINUTES, DEFAULT_MAX_CHAT_HEIGHT, DEFAULT_MAX_IMAGES,
+    DEFAULT_MAX_ITERATIONS, DEFAULT_NUM_CTX, DEFAULT_OLLAMA_URL, DEFAULT_OVERLAY_WIDTH,
+    DEFAULT_QUOTE_MAX_CONTEXT_LENGTH, DEFAULT_QUOTE_MAX_DISPLAY_CHARS,
     DEFAULT_QUOTE_MAX_DISPLAY_LINES, DEFAULT_READER_BATCH_TIMEOUT_S,
     DEFAULT_READER_PER_URL_TIMEOUT_S, DEFAULT_READER_URL, DEFAULT_ROUTER_TIMEOUT_S,
     DEFAULT_SEARCH_TIMEOUT_S, DEFAULT_SEARXNG_MAX_RESULTS, DEFAULT_SEARXNG_URL,
@@ -24,7 +27,8 @@ use super::defaults::{
 use super::error::ConfigError;
 use super::loader::{compose_system_prompt, load_from_path};
 use super::schema::{
-    AppConfig, InferenceSection, PromptSection, QuoteSection, SearchSection, WindowSection,
+    AppConfig, EngineSection, InferenceSection, PromptSection, QuoteSection, SearchSection,
+    WindowSection,
 };
 use super::writer::atomic_write;
 
@@ -77,6 +81,16 @@ fn defaults_const_values_match_schema_defaults() {
     );
     assert_eq!(c.search.judge_timeout_s, DEFAULT_JUDGE_TIMEOUT_S);
     assert_eq!(c.search.router_timeout_s, DEFAULT_ROUTER_TIMEOUT_S);
+    assert_eq!(c.engine.enabled, DEFAULT_ENGINE_ENABLED);
+    assert_eq!(c.engine.mode, DEFAULT_ENGINE_MODE);
+    assert_eq!(c.engine.grpc_url, DEFAULT_ENGINE_GRPC_URL);
+    assert_eq!(c.engine.http_url, DEFAULT_ENGINE_HTTP_URL);
+    assert_eq!(c.engine.startup_timeout_s, DEFAULT_ENGINE_STARTUP_TIMEOUT_S);
+    assert_eq!(c.engine.context_top_k, DEFAULT_ENGINE_CONTEXT_TOP_K);
+    assert_eq!(
+        c.engine.fallback_to_ollama,
+        DEFAULT_ENGINE_FALLBACK_TO_OLLAMA
+    );
 }
 
 #[test]
@@ -101,6 +115,12 @@ fn section_defaults_are_sensible() {
 
     let q = QuoteSection::default();
     assert_eq!(q.max_display_lines, DEFAULT_QUOTE_MAX_DISPLAY_LINES);
+
+    let e = EngineSection::default();
+    assert_eq!(e.grpc_url, DEFAULT_ENGINE_GRPC_URL);
+    assert_eq!(e.context_top_k, DEFAULT_ENGINE_CONTEXT_TOP_K);
+    assert!(e.enabled);
+    assert!(e.fallback_to_ollama);
 }
 
 #[test]
@@ -114,6 +134,8 @@ fn app_config_serde_round_trip_matches_defaults() {
     assert_eq!(parsed.prompt.system, original.prompt.system);
     assert_eq!(parsed.window, original.window);
     assert_eq!(parsed.quote, original.quote);
+    assert_eq!(parsed.search, original.search);
+    assert_eq!(parsed.engine, original.engine);
 }
 
 #[test]
@@ -130,6 +152,7 @@ fn app_config_partial_file_fills_missing_fields_with_defaults() {
         parsed.quote.max_display_lines,
         DEFAULT_QUOTE_MAX_DISPLAY_LINES
     );
+    assert_eq!(parsed.engine.grpc_url, DEFAULT_ENGINE_GRPC_URL);
 }
 
 // ── compose_system_prompt ────────────────────────────────────────────────────
@@ -1022,6 +1045,142 @@ fn toml_partial_search_section_fills_missing_fields_from_defaults() {
         "unset field in partial [search] must fall back to default"
     );
     assert_eq!(loaded.search.max_iterations, DEFAULT_MAX_ITERATIONS);
+}
+
+// ── engine section ───────────────────────────────────────────────────────────
+
+#[test]
+fn engine_section_defaults_are_sane() {
+    let engine = EngineSection::default();
+    assert!(engine.enabled);
+    assert_eq!(engine.mode, "managed");
+    assert!(engine.grpc_url.starts_with("http://127.0.0.1:"));
+    assert!(engine.http_url.starts_with("http://127.0.0.1:"));
+    assert!(engine.startup_timeout_s >= 1);
+    assert!(engine.context_top_k <= 20);
+    assert!(engine.fallback_to_ollama);
+}
+
+#[test]
+fn engine_section_roundtrips_through_toml() {
+    let dir = fresh_temp_dir();
+    let path = config_path_in(&dir);
+    let mut original = AppConfig::default();
+    original.engine.enabled = false;
+    original.engine.mode = "external".to_string();
+    original.engine.grpc_url = "http://127.0.0.1:50052".to_string();
+    original.engine.http_url = "http://127.0.0.1:8081".to_string();
+    original.engine.startup_timeout_s = 45;
+    original.engine.context_top_k = 7;
+    original.engine.fallback_to_ollama = false;
+
+    atomic_write(&path, &original).unwrap();
+    let loaded = load_from_path(&path).unwrap();
+    assert_eq!(loaded.engine, original.engine);
+}
+
+#[test]
+fn engine_empty_urls_and_mode_reset_to_defaults() {
+    let dir = fresh_temp_dir();
+    let path = config_path_in(&dir);
+    std::fs::write(
+        &path,
+        r#"
+            [engine]
+            mode = "   "
+            grpc_url = ""
+            http_url = "  "
+        "#,
+    )
+    .unwrap();
+    let loaded = load_from_path(&path).unwrap();
+    assert_eq!(loaded.engine.mode, DEFAULT_ENGINE_MODE);
+    assert_eq!(loaded.engine.grpc_url, DEFAULT_ENGINE_GRPC_URL);
+    assert_eq!(loaded.engine.http_url, DEFAULT_ENGINE_HTTP_URL);
+}
+
+#[test]
+fn engine_unknown_mode_resets_to_default() {
+    let dir = fresh_temp_dir();
+    let path = config_path_in(&dir);
+    std::fs::write(&path, "[engine]\nmode = \"daemon-cloud\"\n").unwrap();
+    let loaded = load_from_path(&path).unwrap();
+    assert_eq!(loaded.engine.mode, DEFAULT_ENGINE_MODE);
+}
+
+#[test]
+fn engine_bounds_reset_to_defaults() {
+    let dir = fresh_temp_dir();
+    let path = config_path_in(&dir);
+    std::fs::write(
+        &path,
+        "[engine]\nstartup_timeout_s = 0\ncontext_top_k = 999\n",
+    )
+    .unwrap();
+    let loaded = load_from_path(&path).unwrap();
+    assert_eq!(
+        loaded.engine.startup_timeout_s,
+        DEFAULT_ENGINE_STARTUP_TIMEOUT_S
+    );
+    assert_eq!(loaded.engine.context_top_k, DEFAULT_ENGINE_CONTEXT_TOP_K);
+}
+
+#[test]
+fn engine_negative_numeric_values_reset_to_defaults_without_corrupting_file() {
+    let dir = fresh_temp_dir();
+    let path = config_path_in(&dir);
+    std::fs::write(
+        &path,
+        "[engine]\nstartup_timeout_s = -1\ncontext_top_k = -2\n",
+    )
+    .unwrap();
+
+    let loaded = load_from_path(&path).unwrap();
+    assert_eq!(
+        loaded.engine.startup_timeout_s,
+        DEFAULT_ENGINE_STARTUP_TIMEOUT_S
+    );
+    assert_eq!(loaded.engine.context_top_k, DEFAULT_ENGINE_CONTEXT_TOP_K);
+    let renamed_exists = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"));
+    assert!(
+        !renamed_exists,
+        "negative fields should not corrupt the whole config"
+    );
+}
+
+#[test]
+fn toml_without_engine_section_deserializes_to_defaults() {
+    let dir = fresh_temp_dir();
+    let path = config_path_in(&dir);
+    std::fs::write(
+        &path,
+        "[inference]\nollama_url = \"http://127.0.0.1:11434\"\n",
+    )
+    .unwrap();
+    let loaded = load_from_path(&path).unwrap();
+    assert_eq!(loaded.engine.grpc_url, DEFAULT_ENGINE_GRPC_URL);
+    assert_eq!(
+        loaded.engine.startup_timeout_s,
+        DEFAULT_ENGINE_STARTUP_TIMEOUT_S
+    );
+}
+
+#[test]
+fn toml_partial_engine_section_fills_missing_fields_from_defaults() {
+    let dir = fresh_temp_dir();
+    let path = config_path_in(&dir);
+    std::fs::write(
+        &path,
+        "[engine]\ngrpc_url = \"http://192.168.1.50:50051\"\n",
+    )
+    .unwrap();
+    let loaded = load_from_path(&path).unwrap();
+    assert_eq!(loaded.engine.grpc_url, "http://192.168.1.50:50051");
+    assert_eq!(loaded.engine.http_url, DEFAULT_ENGINE_HTTP_URL);
+    assert_eq!(loaded.engine.context_top_k, DEFAULT_ENGINE_CONTEXT_TOP_K);
 }
 
 // ── error: serde_json round-trip ────────────────────────────────────────────

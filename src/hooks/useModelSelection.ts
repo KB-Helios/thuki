@@ -2,11 +2,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { ModelPickerState } from '../types/model';
 
+type ModelBackend = NonNullable<ModelPickerState['backend']>;
+
 /**
  * Runtime guard for the IPC boundary. The Rust backend is trusted, but this
  * keeps the hook robust against shape drift (schema changes, legacy builds,
  * mocks) without pulling in a schema library. Accepts `null` for `active`
- * because Ollama's `/api/tags` is the single source of truth: the backend
+ * because the backend inventory is the single source of truth: the backend
  * returns null when nothing is installed and nothing is persisted.
  */
 function isModelPickerState(value: unknown): value is ModelPickerState {
@@ -14,12 +16,23 @@ function isModelPickerState(value: unknown): value is ModelPickerState {
   const candidate = value as {
     active?: unknown;
     all?: unknown;
+    backend?: unknown;
+    backendReachable?: unknown;
     ollamaReachable?: unknown;
   };
   const activeOk =
     candidate.active === null || typeof candidate.active === 'string';
+  const backendOk =
+    candidate.backend === undefined ||
+    candidate.backend === 'engine' ||
+    candidate.backend === 'ollama';
+  const backendReachableOk =
+    candidate.backendReachable === undefined ||
+    typeof candidate.backendReachable === 'boolean';
   return (
     activeOk &&
+    backendOk &&
+    backendReachableOk &&
     Array.isArray(candidate.all) &&
     candidate.all.every((entry) => typeof entry === 'string') &&
     typeof candidate.ollamaReachable === 'boolean'
@@ -31,13 +44,13 @@ function isModelPickerState(value: unknown): value is ModelPickerState {
  */
 export interface UseModelSelectionResult {
   /**
-   * The currently active Ollama model name, or `null` when none is selected
+   * The currently active model name, or `null` when none is selected
    * (either nothing is installed or the picker has not resolved yet).
    * Consumers must treat `null` as "block the action and surface the picker",
    * never as a trigger to invent a default.
    */
   activeModel: string | null;
-  /** All locally installed Ollama model names available for selection. */
+  /** All locally installed model names available for selection. */
   availableModels: string[];
   /**
    * Whether the most recent backend call reached the local Ollama daemon.
@@ -48,6 +61,10 @@ export interface UseModelSelectionResult {
    * Ollama" instead of "pull a model".
    */
   ollamaReachable: boolean;
+  /** Backend that produced the current model inventory. */
+  modelBackend: ModelBackend;
+  /** Whether the current model backend was reachable during the last fetch. */
+  modelBackendReachable: boolean;
   /**
    * Re-fetch the model picker state from the backend. Sets `activeModel` to
    * `null` and clears `availableModels` when the backend returns a malformed
@@ -65,7 +82,7 @@ export interface UseModelSelectionResult {
 }
 
 /**
- * React hook that manages the active Ollama model selection. Loads the
+ * React hook that manages the active model selection. Loads the
  * current model + the installed model list from the Rust backend on mount,
  * and exposes imperative helpers for refresh and selection.
  *
@@ -84,6 +101,9 @@ export function useModelSelection(): UseModelSelectionResult {
   // otherwise. This prevents a cold-start flash of the "Ollama is down"
   // strip while the IPC call is in flight.
   const [ollamaReachable, setOllamaReachable] = useState<boolean>(true);
+  const [modelBackend, setModelBackend] = useState<ModelBackend>('ollama');
+  const [modelBackendReachable, setModelBackendReachable] =
+    useState<boolean>(true);
 
   const mountedRef = useRef(true);
   const latestTokenRef = useRef(0);
@@ -112,16 +132,23 @@ export function useModelSelection(): UseModelSelectionResult {
         setActiveModelState(null);
         setAvailableModels([]);
         setOllamaReachable(false);
+        setModelBackend('ollama');
+        setModelBackendReachable(false);
         return;
       }
+      const backend = state.backend ?? 'ollama';
       setActiveModelState(state.active);
       setAvailableModels(state.all);
       setOllamaReachable(state.ollamaReachable);
+      setModelBackend(backend);
+      setModelBackendReachable(state.backendReachable ?? state.ollamaReachable);
     } catch {
       if (!isLatest(token)) return;
       setActiveModelState(null);
       setAvailableModels([]);
       setOllamaReachable(false);
+      setModelBackend('ollama');
+      setModelBackendReachable(false);
     }
   }, [isLatest]);
 
@@ -152,6 +179,8 @@ export function useModelSelection(): UseModelSelectionResult {
     activeModel,
     availableModels,
     ollamaReachable,
+    modelBackend,
+    modelBackendReachable,
     refreshModels,
     setActiveModel,
   };

@@ -726,6 +726,135 @@ describe('ChatBubble', () => {
     });
   });
 
+  describe('local context footer', () => {
+    it('renders compact local context labels for engine sources', () => {
+      render(
+        <ChatBubble
+          role="assistant"
+          content="answer"
+          index={0}
+          contextSources={[
+            {
+              title: 'Design Notes',
+              uri: 'file:///notes.md',
+              snippet: 'local snippet',
+            },
+          ]}
+        />,
+      );
+
+      expect(screen.getByTestId('context-sources')).toHaveTextContent(
+        'Local context',
+      );
+      expect(screen.getByText('Design Notes')).toBeInTheDocument();
+    });
+
+    it('opens http local context sources but leaves file URIs inert', () => {
+      render(
+        <ChatBubble
+          role="assistant"
+          content="answer"
+          index={0}
+          contextSources={[
+            {
+              title: 'Web Doc',
+              uri: 'https://example.com/doc',
+              snippet: 'remote snippet',
+            },
+            {
+              title: 'Local Doc',
+              uri: 'file:///notes.md',
+              snippet: 'local snippet',
+            },
+          ]}
+        />,
+      );
+
+      fireEvent.click(screen.getByText('Web Doc'));
+      expect(invoke).toHaveBeenCalledWith('open_url', {
+        url: 'https://example.com/doc',
+      });
+      expect(screen.getByText('Local Doc').tagName).toBe('SPAN');
+    });
+
+    it('uses the label as tooltip for http local context sources without snippets', () => {
+      render(
+        <ChatBubble
+          role="assistant"
+          content="answer"
+          index={0}
+          contextSources={[
+            {
+              title: 'Web Doc',
+              uri: 'https://example.com/doc',
+              snippet: '',
+            },
+          ]}
+        />,
+      );
+
+      expect(screen.getByText('Web Doc')).toHaveAttribute('title', 'Web Doc');
+    });
+
+    it('falls back to URI labels, label tooltips, and overflow count', () => {
+      render(
+        <ChatBubble
+          role="assistant"
+          content="answer"
+          index={0}
+          contextSources={[
+            {
+              title: '',
+              uri: 'file:///untitled.md',
+              snippet: '',
+            },
+            {
+              title: 'Second',
+              uri: 'file:///second.md',
+              snippet: '',
+            },
+            {
+              title: 'Third',
+              uri: 'file:///third.md',
+              snippet: '',
+            },
+            {
+              title: 'Fourth',
+              uri: 'file:///fourth.md',
+              snippet: '',
+            },
+          ]}
+        />,
+      );
+
+      const uriLabel = screen.getByText('file:///untitled.md');
+      expect(uriLabel).toBeInTheDocument();
+      expect(uriLabel).toHaveAttribute('title', 'file:///untitled.md');
+      expect(screen.getByText('+1')).toBeInTheDocument();
+      expect(screen.queryByText('Fourth')).toBeNull();
+    });
+
+    it('does not render local context while the assistant is streaming', () => {
+      render(
+        <ChatBubble
+          role="assistant"
+          content="partial"
+          index={0}
+          isStreaming
+          contextSources={[
+            {
+              title: 'Hidden',
+              uri: 'file:///hidden.md',
+              snippet: 'hidden snippet',
+            },
+          ]}
+        />,
+      );
+
+      expect(screen.queryByTestId('context-sources')).toBeNull();
+    });
+  });
+
   describe('search warning icon', () => {
     it('renders the warning icon beside Sources when message has searchWarnings', () => {
       render(
