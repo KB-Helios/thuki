@@ -32,6 +32,55 @@ use crate::history::Database;
 /// `app_config` key used to persist the user's selected model slug.
 pub const ACTIVE_MODEL_KEY: &str = "active_model";
 
+/// Runtime configuration projection for the models subsystem.
+///
+/// Extracted from [`AppConfig`] at command entry so model-layer code does not
+/// depend on the full TOML schema. Owns only the fields actually consumed by
+/// model picker, capabilities, and setup commands.
+#[derive(Debug, Clone)]
+pub struct ModelRuntimeConfig {
+    /// Base URL of the local Ollama instance.
+    pub ollama_url: String,
+    /// Whether the rag-engine backend is enabled.
+    pub engine_enabled: bool,
+    /// Engine lifecycle mode (`managed` or `external`).
+    pub engine_mode: String,
+    /// gRPC endpoint for engine services.
+    pub engine_grpc_url: String,
+    /// Whether to fall back to Ollama when engine is unavailable.
+    pub engine_fallback_to_ollama: bool,
+}
+
+impl ModelRuntimeConfig {
+    /// Constructs the runtime config from the loaded [`AppConfig`].
+    pub fn from_app_config(cfg: &AppConfig) -> Self {
+        Self {
+            ollama_url: cfg.inference.ollama_url.clone(),
+            engine_enabled: cfg.engine.enabled,
+            engine_mode: cfg.engine.mode.clone(),
+            engine_grpc_url: cfg.engine.grpc_url.clone(),
+            engine_fallback_to_ollama: cfg.engine.fallback_to_ollama,
+        }
+    }
+
+    /// Helper to determine if engine models should be probed.
+    pub fn should_probe_engine(&self, supervisor: &EngineSupervisor) -> bool {
+        self.engine_enabled && (self.engine_mode != DEFAULT_ENGINE_MODE || supervisor.is_running())
+    }
+}
+
+impl Default for ModelRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            ollama_url: crate::config::defaults::DEFAULT_OLLAMA_URL.to_string(),
+            engine_enabled: crate::config::defaults::DEFAULT_ENGINE_ENABLED,
+            engine_mode: crate::config::defaults::DEFAULT_ENGINE_MODE.to_string(),
+            engine_grpc_url: crate::config::defaults::DEFAULT_ENGINE_GRPC_URL.to_string(),
+            engine_fallback_to_ollama: crate::config::defaults::DEFAULT_ENGINE_FALLBACK_TO_OLLAMA,
+        }
+    }
+}
+
 /// Shared error-message prefix used when a requested slug is not present in
 /// the live Ollama inventory. Exported so the frontend and tests can match
 /// against a stable constant instead of a prose string.
@@ -48,10 +97,6 @@ pub const MODEL_NOT_INSTALLED_ERR_PREFIX: &str = "Model is not installed in Olla
 /// trigger to invent a default.
 #[derive(Default)]
 pub struct ActiveModelState(pub Mutex<Option<String>>);
-
-fn should_probe_engine_models(config: &AppConfig, supervisor: &EngineSupervisor) -> bool {
-    config.engine.enabled && (config.engine.mode != DEFAULT_ENGINE_MODE || supervisor.is_running())
-}
 
 /// Top-level shape of the Ollama `/api/tags` response. Only the `models`
 /// array is consumed; all other fields are ignored.
@@ -256,11 +301,11 @@ pub async fn get_model_picker_state(
     active_model: tauri::State<'_, ActiveModelState>,
     config: tauri::State<'_, parking_lot::RwLock<AppConfig>>,
 ) -> Result<serde_json::Value, String> {
-    let config_snapshot = config.read().clone();
-    let can_probe_engine = should_probe_engine_models(&config_snapshot, &engine_supervisor);
+    let runtime_config = ModelRuntimeConfig::from_app_config(&config.read());
+    let can_probe_engine = runtime_config.should_probe_engine(&engine_supervisor);
     if can_probe_engine {
         match engine_client
-            .list_models(&config_snapshot.engine.grpc_url)
+            .list_models(&runtime_config.engine_grpc_url)
             .await
         {
             Ok(models) => {
@@ -291,7 +336,7 @@ pub async fn get_model_picker_state(
                     true,
                 ));
             }
-            Err(_) if !config_snapshot.engine.fallback_to_ollama => {
+            Err(_) if !runtime_config.engine_fallback_to_ollama => {
                 let mut guard = active_model.0.lock().map_err(|e| e.to_string())?;
                 *guard = None;
                 return Ok(build_picker_state_payload_with_backend(
@@ -304,7 +349,7 @@ pub async fn get_model_picker_state(
             }
             Err(_) => {}
         }
-    } else if config_snapshot.engine.enabled && !config_snapshot.engine.fallback_to_ollama {
+    } else if runtime_config.engine_enabled && !runtime_config.engine_fallback_to_ollama {
         let mut guard = active_model.0.lock().map_err(|e| e.to_string())?;
         *guard = None;
         return Ok(build_picker_state_payload_with_backend(
@@ -316,7 +361,7 @@ pub async fn get_model_picker_state(
         ));
     }
 
-    let ollama_url = config_snapshot.inference.ollama_url.clone();
+    let ollama_url = runtime_config.ollama_url.clone();
     let fetch_result = fetch_installed_model_names(&client, &ollama_url).await;
 
     let installed = match fetch_result {
@@ -446,11 +491,11 @@ pub async fn set_active_model(
 ) -> Result<(), String> {
     validate_model_slug(&model)?;
 
-    let config_snapshot = config.read().clone();
-    let can_probe_engine = should_probe_engine_models(&config_snapshot, &engine_supervisor);
+    let runtime_config = ModelRuntimeConfig::from_app_config(&config.read());
+    let can_probe_engine = runtime_config.should_probe_engine(&engine_supervisor);
     if can_probe_engine {
         match engine_client
-            .list_models(&config_snapshot.engine.grpc_url)
+            .list_models(&runtime_config.engine_grpc_url)
             .await
         {
             Ok(models) => {
@@ -459,16 +504,16 @@ pub async fn set_active_model(
                 persist_active_model(&db, &active_model, model)?;
                 return Ok(());
             }
-            Err(_) if !config_snapshot.engine.fallback_to_ollama => {
+            Err(_) if !runtime_config.engine_fallback_to_ollama => {
                 return Err(format!("{MODEL_NOT_INSTALLED_ERR_PREFIX}{model}"));
             }
             Err(_) => {}
         }
-    } else if config_snapshot.engine.enabled && !config_snapshot.engine.fallback_to_ollama {
+    } else if runtime_config.engine_enabled && !runtime_config.engine_fallback_to_ollama {
         return Err(format!("{MODEL_NOT_INSTALLED_ERR_PREFIX}{model}"));
     }
 
-    let ollama_url = config_snapshot.inference.ollama_url.clone();
+    let ollama_url = runtime_config.ollama_url.clone();
     let installed = fetch_installed_model_names(&client, &ollama_url).await?;
     validate_model_installed(&model, &installed)?;
     persist_active_model(&db, &active_model, model)
@@ -585,7 +630,8 @@ pub async fn check_model_setup(
     active_model: tauri::State<'_, ActiveModelState>,
     config: tauri::State<'_, parking_lot::RwLock<AppConfig>>,
 ) -> Result<ModelSetupState, String> {
-    let ollama_url = config.read().inference.ollama_url.clone();
+    let runtime_config = ModelRuntimeConfig::from_app_config(&config.read());
+    let ollama_url = runtime_config.ollama_url.clone();
     let installed_result = fetch_installed_model_names(&client, &ollama_url).await;
 
     let persisted = {
@@ -851,22 +897,22 @@ pub async fn get_model_capabilities(
     cache: tauri::State<'_, ModelCapabilitiesCache>,
     config: tauri::State<'_, parking_lot::RwLock<AppConfig>>,
 ) -> Result<HashMap<String, Capabilities>, String> {
-    let config_snapshot = config.read().clone();
-    let can_probe_engine = should_probe_engine_models(&config_snapshot, &engine_supervisor);
+    let runtime_config = ModelRuntimeConfig::from_app_config(&config.read());
+    let can_probe_engine = runtime_config.should_probe_engine(&engine_supervisor);
     if can_probe_engine {
         match engine_client
-            .list_models(&config_snapshot.engine.grpc_url)
+            .list_models(&runtime_config.engine_grpc_url)
             .await
         {
             Ok(models) => return Ok(engine_capabilities(&models)),
-            Err(_) if !config_snapshot.engine.fallback_to_ollama => return Ok(HashMap::new()),
+            Err(_) if !runtime_config.engine_fallback_to_ollama => return Ok(HashMap::new()),
             Err(_) => {}
         }
-    } else if config_snapshot.engine.enabled && !config_snapshot.engine.fallback_to_ollama {
+    } else if runtime_config.engine_enabled && !runtime_config.engine_fallback_to_ollama {
         return Ok(HashMap::new());
     }
 
-    let base_url = config_snapshot.inference.ollama_url.clone();
+    let base_url = runtime_config.ollama_url.clone();
     let installed = fetch_installed_model_names(&client, &base_url).await?;
     Ok(reconcile_capabilities(&client, &cache, &base_url, &installed).await)
 }

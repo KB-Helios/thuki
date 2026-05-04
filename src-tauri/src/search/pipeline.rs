@@ -5883,7 +5883,6 @@ mod agentic_tests {
     // (is_connect() == true), which maps to FetchOutcome::ServiceUnavailable.
     // Since warnings is empty at that point, lines 764-767 fire.
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn one_shot_reader_server() -> (String, tokio::task::JoinHandle<()>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
