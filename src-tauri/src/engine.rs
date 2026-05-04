@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+use futures_util::Stream;
 use parking_lot::Mutex;
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -17,7 +18,12 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel as TonicChannel;
 
-use crate::config::defaults::DEFAULT_ENGINE_MODE;
+use crate::config::defaults::{
+    DEFAULT_CONTEXT_SERVICE_PORT, DEFAULT_ENGINE_DAEMON_PORT, DEFAULT_ENGINE_GRPC_PORT,
+    DEFAULT_ENGINE_HOST, DEFAULT_ENGINE_HTTP_PORT, DEFAULT_ENGINE_LOCAL_CONTEXT_MAX_SNIPPET_CHARS,
+    DEFAULT_ENGINE_MODE, DEFAULT_ENGINE_RUNTIME_TEMPERATURE, DEFAULT_ENGINE_RUNTIME_TOP_K,
+    DEFAULT_ENGINE_RUNTIME_TOP_P,
+};
 use crate::config::AppConfig;
 
 pub mod pb {
@@ -27,9 +33,6 @@ pub mod pb {
 const ENGINE_BINARY_BASENAME: &str = "ai-engine-server";
 const ENGINE_CONFIG_FILE_NAME: &str = "config.yaml";
 const ENGINE_DATA_DIR_NAME: &str = "rag-engine";
-const DEFAULT_ENGINE_DAEMON_PORT: u16 = 50061;
-const DEFAULT_CONTEXT_SERVICE_PORT: u16 = 9191;
-const LOCAL_CONTEXT_MAX_SNIPPET_CHARS: usize = 900;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -242,7 +245,7 @@ impl EngineClient {
         &self,
         params: EngineInferenceParams,
         cancel_token: CancellationToken,
-        mut on_event: impl FnMut(EngineStreamEvent),
+        on_event: impl FnMut(EngineStreamEvent),
     ) -> Result<String, EngineError> {
         let mut client = self.runtime_client(&params.grpc_url).await?;
         let request = pb::InferenceRequest {
@@ -258,28 +261,40 @@ impl EngineClient {
             .stream_inference(tonic::Request::new(outbound))
             .await?
             .into_inner();
-        let mut accumulated = String::new();
+        Ok(collect_inference_stream(&mut stream, cancel_token, on_event).await?)
+    }
+}
 
-        loop {
-            tokio::select! {
-                biased;
-                _ = cancel_token.cancelled() => {
-                    on_event(EngineStreamEvent::Cancelled);
+async fn collect_inference_stream<S>(
+    stream: &mut S,
+    cancel_token: CancellationToken,
+    mut on_event: impl FnMut(EngineStreamEvent),
+) -> Result<String, tonic::Status>
+where
+    S: Stream<Item = Result<pb::InferenceResponse, tonic::Status>> + Unpin,
+{
+    let mut accumulated = String::new();
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => {
+                on_event(EngineStreamEvent::Cancelled);
+                return Ok(accumulated);
+            }
+            maybe = stream.next() => {
+                let Some(message) = maybe else {
+                    on_event(EngineStreamEvent::Done);
                     return Ok(accumulated);
+                };
+                let response = message?;
+                if !response.token.is_empty() {
+                    accumulated.push_str(&response.token);
+                    on_event(EngineStreamEvent::Token(response.token));
                 }
-                maybe = stream.next() => {
-                    let Some(message) = maybe else {
-                        return Ok(accumulated);
-                    };
-                    let response = message?;
-                    if !response.token.is_empty() {
-                        accumulated.push_str(&response.token);
-                        on_event(EngineStreamEvent::Token(response.token));
-                    }
-                    if response.complete {
-                        on_event(EngineStreamEvent::Done);
-                        return Ok(accumulated);
-                    }
+                if response.complete {
+                    on_event(EngineStreamEvent::Done);
+                    return Ok(accumulated);
                 }
             }
         }
@@ -382,12 +397,16 @@ async fn start_managed_engine_for_app(
         let supervisor = app.state::<EngineSupervisor>();
         supervisor.start_managed(&app, &config, &app_data_dir)?;
     }
-    wait_for_grpc_ready(
+    let ready = wait_for_grpc_ready(
         &EngineClient,
         &config.engine.grpc_url,
         Duration::from_secs(config.engine.startup_timeout_s),
     )
-    .await
+    .await;
+    if ready.is_err() {
+        app.state::<EngineSupervisor>().stop();
+    }
+    ready
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -448,7 +467,10 @@ pub fn build_augmented_prompt(message: &str, sources: &[ContextSourcePreview]) -
 
     let mut prompt = String::from("Local context:\n");
     for (index, source) in sources.iter().enumerate() {
-        let snippet = truncate_chars(source.snippet.trim(), LOCAL_CONTEXT_MAX_SNIPPET_CHARS);
+        let snippet = truncate_chars(
+            source.snippet.trim(),
+            DEFAULT_ENGINE_LOCAL_CONTEXT_MAX_SNIPPET_CHARS,
+        );
         prompt.push_str(&format!(
             "[{}] {}\nURI: {}\n{}\n\n",
             index + 1,
@@ -499,9 +521,18 @@ pub fn map_rag_result(result: pb::SearchResult) -> ContextSourcePreview {
 
 pub fn default_runtime_parameters() -> HashMap<String, String> {
     HashMap::from([
-        ("temperature".to_string(), "1.0".to_string()),
-        ("top_p".to_string(), "0.95".to_string()),
-        ("top_k".to_string(), "64".to_string()),
+        (
+            "temperature".to_string(),
+            DEFAULT_ENGINE_RUNTIME_TEMPERATURE.to_string(),
+        ),
+        (
+            "top_p".to_string(),
+            DEFAULT_ENGINE_RUNTIME_TOP_P.to_string(),
+        ),
+        (
+            "top_k".to_string(),
+            DEFAULT_ENGINE_RUNTIME_TOP_K.to_string(),
+        ),
     ])
 }
 
@@ -510,8 +541,16 @@ pub fn engine_root_dir(app_data_dir: &Path) -> PathBuf {
 }
 
 pub fn render_engine_config(app_data_dir: &Path, config: &AppConfig) -> String {
-    let (http_host, http_port) = parse_endpoint(&config.engine.http_url, "127.0.0.1", 8080);
-    let (grpc_host, grpc_port) = parse_endpoint(&config.engine.grpc_url, "127.0.0.1", 50051);
+    let (http_host, http_port) = parse_endpoint(
+        &config.engine.http_url,
+        DEFAULT_ENGINE_HOST,
+        DEFAULT_ENGINE_HTTP_PORT,
+    );
+    let (grpc_host, grpc_port) = parse_endpoint(
+        &config.engine.grpc_url,
+        DEFAULT_ENGINE_HOST,
+        DEFAULT_ENGINE_GRPC_PORT,
+    );
     let engine_dir = engine_root_dir(app_data_dir);
     let models_dir = engine_dir.join("models");
     let rag_dir = engine_dir.join("rag");
@@ -628,25 +667,26 @@ logging:
 
 pub fn parse_endpoint(url: &str, fallback_host: &str, fallback_port: u16) -> (String, u16) {
     let trimmed = url.trim();
-    let without_scheme = trimmed
-        .strip_prefix("http://")
-        .or_else(|| trimmed.strip_prefix("https://"))
-        .unwrap_or(trimmed);
-    let authority = without_scheme.split('/').next().unwrap_or("");
-    let authority = authority.trim();
-    if authority.is_empty() {
+    if trimmed.is_empty() {
         return (fallback_host.to_string(), fallback_port);
     }
-    let Some((host, port)) = authority.rsplit_once(':') else {
-        return (authority.to_string(), fallback_port);
-    };
-    let parsed_port = port.parse::<u16>().unwrap_or(fallback_port);
-    let host = host.trim_matches(|c| c == '[' || c == ']');
-    if host.is_empty() {
-        (fallback_host.to_string(), parsed_port)
+
+    let parsed = if trimmed.contains("://") {
+        reqwest::Url::parse(trimmed)
     } else {
-        (host.to_string(), parsed_port)
-    }
+        reqwest::Url::parse(&format!("http://{trimmed}"))
+    };
+    let Ok(parsed) = parsed else {
+        return (fallback_host.to_string(), fallback_port);
+    };
+
+    let host = parsed
+        .host_str()
+        .unwrap_or(fallback_host)
+        .trim_matches(|c| c == '[' || c == ']');
+    let host = if host.is_empty() { fallback_host } else { host };
+    let port = parsed.port().unwrap_or(fallback_port);
+    (host.to_string(), port)
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -673,18 +713,35 @@ fn resolve_engine_binary(app: &tauri::AppHandle) -> Result<Option<PathBuf>, Engi
 }
 
 pub fn candidate_engine_binary_paths(root: &Path) -> Vec<PathBuf> {
-    let binary = platform_binary_name(ENGINE_BINARY_BASENAME);
-    vec![
-        root.join(&binary),
-        root.join("binaries").join(&binary),
-        root.join("src-tauri").join("binaries").join(&binary),
-        root.join("external")
-            .join("rag-engine")
-            .join("engine")
-            .join("go")
-            .join("bin")
-            .join(&binary),
-    ]
+    platform_binary_names(ENGINE_BINARY_BASENAME)
+        .into_iter()
+        .flat_map(|binary| {
+            [
+                root.join(&binary),
+                root.join("binaries").join(&binary),
+                root.join("src-tauri").join("binaries").join(&binary),
+                root.join("external")
+                    .join("rag-engine")
+                    .join("engine")
+                    .join("go")
+                    .join("bin")
+                    .join(&binary),
+            ]
+        })
+        .collect()
+}
+
+pub fn platform_binary_names(base: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let plain = platform_binary_name(base);
+    names.push(plain);
+    if let Some(target_triple) = option_env!("TAURI_ENV_TARGET_TRIPLE") {
+        let target_specific = platform_binary_name(&format!("{base}-{target_triple}"));
+        if !names.contains(&target_specific) {
+            names.push(target_specific);
+        }
+    }
+    names
 }
 
 fn platform_binary_name_for(base: &str, is_windows: bool) -> String {
@@ -801,7 +858,11 @@ mod tests {
         );
         assert_eq!(
             parse_endpoint("http://:50051", "fallback", 42),
-            ("fallback".to_string(), 50051)
+            ("fallback".to_string(), 42)
+        );
+        assert_eq!(
+            parse_endpoint("http://[::1]:50051", "fallback", 42),
+            ("::1".to_string(), 50051)
         );
     }
 
@@ -898,7 +959,7 @@ mod tests {
 
     #[test]
     fn augmented_prompt_adds_bounded_local_context_block() {
-        let long = "x".repeat(LOCAL_CONTEXT_MAX_SNIPPET_CHARS + 4);
+        let long = "x".repeat(DEFAULT_ENGINE_LOCAL_CONTEXT_MAX_SNIPPET_CHARS + 4);
         let prompt = build_augmented_prompt(
             "answer this",
             &[ContextSourcePreview {
@@ -948,6 +1009,49 @@ mod tests {
         assert_eq!(params["top_k"], "64");
     }
 
+    #[tokio::test]
+    async fn collect_inference_stream_emits_done_on_clean_end() {
+        let mut stream = tokio_stream::iter(vec![Ok(pb::InferenceResponse {
+            token: "hello".to_string(),
+            complete: false,
+            ..Default::default()
+        })]);
+        let token = CancellationToken::new();
+        let mut events = Vec::new();
+
+        let accumulated = collect_inference_stream(&mut stream, token, |event| events.push(event))
+            .await
+            .unwrap();
+
+        assert_eq!(accumulated, "hello");
+        assert_eq!(
+            events,
+            vec![
+                EngineStreamEvent::Token("hello".to_string()),
+                EngineStreamEvent::Done
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_inference_stream_cancel_wins_before_reading() {
+        let mut stream = tokio_stream::iter(vec![Ok(pb::InferenceResponse {
+            token: "ignored".to_string(),
+            complete: true,
+            ..Default::default()
+        })]);
+        let token = CancellationToken::new();
+        token.cancel();
+        let mut events = Vec::new();
+
+        let accumulated = collect_inference_stream(&mut stream, token, |event| events.push(event))
+            .await
+            .unwrap();
+
+        assert!(accumulated.is_empty());
+        assert_eq!(events, vec![EngineStreamEvent::Cancelled]);
+    }
+
     #[test]
     fn platform_binary_name_adds_exe_on_windows_only() {
         let name = platform_binary_name("ai-engine-server");
@@ -963,6 +1067,17 @@ mod tests {
             platform_binary_name_for("ai-engine-server", false),
             "ai-engine-server"
         );
+    }
+
+    #[test]
+    fn platform_binary_names_include_tauri_target_variant_when_available() {
+        let names = platform_binary_names("ai-engine-server");
+        assert!(names.contains(&platform_binary_name("ai-engine-server")));
+        if let Some(target_triple) = option_env!("TAURI_ENV_TARGET_TRIPLE") {
+            assert!(names.contains(&platform_binary_name(&format!(
+                "ai-engine-server-{target_triple}"
+            ))));
+        }
     }
 
     #[test]

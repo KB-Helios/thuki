@@ -4,8 +4,17 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(coverage_nightly)");
 
     compile_rag_engine_proto();
+    skip_external_sidecar_for_debug_checks();
 
     tauri_build::build()
+}
+
+fn skip_external_sidecar_for_debug_checks() {
+    if std::env::var("PROFILE").as_deref() == Ok("debug")
+        && std::env::var_os("TAURI_CONFIG").is_none()
+    {
+        std::env::set_var("TAURI_CONFIG", r#"{"bundle":{"externalBin":[]}}"#);
+    }
 }
 
 fn compile_rag_engine_proto() {
@@ -42,17 +51,21 @@ fn compile_rag_engine_proto() {
         .expect("write staged rag-engine client proto");
 
     let protoc = protoc_bin_vendored::protoc_bin_path().expect("vendored protoc available");
-    std::env::set_var("PROTOC", protoc);
+    let mut prost_config = tonic_prost_build::Config::new();
+    prost_config.protoc_executable(protoc);
 
     tonic_prost_build::configure()
         .build_server(false)
-        .compile_protos(&[staged_proto], &[staged_proto_dir, include_dir])
+        .compile_with_config(
+            prost_config,
+            &[staged_proto],
+            &[staged_proto_dir, include_dir],
+        )
         .expect("compile rag-engine protobuf contract");
 }
 
 fn remove_service_block(proto: &str, service_name: &str) -> String {
-    let needle = format!("service {service_name} {{");
-    let Some(start) = proto.find(&needle) else {
+    let Some(start) = find_service_block_start(proto, service_name) else {
         return proto.to_string();
     };
 
@@ -83,4 +96,46 @@ fn remove_service_block(proto: &str, service_name: &str) -> String {
         output.push_str(remainder);
     }
     output
+}
+
+fn find_service_block_start(proto: &str, service_name: &str) -> Option<usize> {
+    let mut search_from = 0usize;
+    while let Some(relative_start) = proto[search_from..].find("service") {
+        let start = search_from + relative_start;
+        let after_keyword = start + "service".len();
+        if start > 0 && is_ident_char(proto.as_bytes()[start - 1] as char) {
+            search_from = after_keyword;
+            continue;
+        }
+        let mut cursor = skip_whitespace(proto, after_keyword);
+        let Some(after_name) = proto[cursor..].strip_prefix(service_name) else {
+            search_from = after_keyword;
+            continue;
+        };
+        cursor += service_name.len();
+        if after_name.chars().next().is_some_and(is_ident_char) {
+            search_from = after_keyword;
+            continue;
+        }
+        cursor = skip_whitespace(proto, cursor);
+        if proto.as_bytes().get(cursor) == Some(&b'{') {
+            return Some(start);
+        }
+        search_from = after_keyword;
+    }
+    None
+}
+
+fn skip_whitespace(input: &str, mut cursor: usize) -> usize {
+    while let Some(ch) = input[cursor..].chars().next() {
+        if !ch.is_whitespace() {
+            break;
+        }
+        cursor += ch.len_utf8();
+    }
+    cursor
+}
+
+fn is_ident_char(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
 }

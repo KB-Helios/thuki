@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use futures_util::StreamExt;
@@ -6,11 +6,13 @@ use serde::{Deserialize, Serialize};
 use tauri::{ipc::Channel, State};
 use tokio_util::sync::CancellationToken;
 
-use crate::config::defaults::STRIP_PATTERNS;
+use crate::config::defaults::{
+    DEFAULT_ENGINE_HISTORY_WINDOW_TURNS, DEFAULT_ENGINE_MODE, STRIP_PATTERNS,
+};
 use crate::config::AppConfig;
 use crate::engine::{
     build_augmented_prompt, should_fallback_to_ollama, should_route_to_engine,
-    ContextSourcePreview, EngineClient, EngineInferenceParams, EngineStreamEvent,
+    ContextSourcePreview, EngineClient, EngineInferenceParams, EngineStreamEvent, EngineSupervisor,
 };
 use crate::models::{Capabilities, ModelCapabilitiesCache};
 
@@ -355,9 +357,10 @@ pub fn build_engine_prompt_from_history(history: &[ChatMessage], current_message
     }
 
     let mut prompt = String::from("Conversation so far:\n");
-    let start_index = history.len().saturating_sub(12);
-    for message in &history[start_index..]
-    {
+    let start_index = history
+        .len()
+        .saturating_sub(DEFAULT_ENGINE_HISTORY_WINDOW_TURNS);
+    for message in &history[start_index..] {
         let role = if message.role == "assistant" {
             "Assistant"
         } else {
@@ -371,6 +374,10 @@ pub fn build_engine_prompt_from_history(history: &[ChatMessage], current_message
     prompt.push_str("Current request:\n");
     prompt.push_str(current_message);
     prompt
+}
+
+pub fn engine_session_id(epoch: u64) -> String {
+    format!("thuki-overlay-{epoch}")
 }
 
 /// Core streaming logic for Ollama `/api/chat`, separated from the Tauri
@@ -518,6 +525,7 @@ pub async fn ask_ai(
     active_model: State<'_, crate::models::ActiveModelState>,
     capabilities_cache: State<'_, ModelCapabilitiesCache>,
     engine_client: State<'_, EngineClient>,
+    engine_supervisor: State<'_, EngineSupervisor>,
 ) -> Result<(), String> {
     let config_snapshot = config.read().clone();
     let has_images = has_attached_images(image_paths.as_deref());
@@ -539,12 +547,58 @@ pub async fn ask_ai(
         .await;
     }
 
-    if let Err(err) = engine_client
-        .get_status(&config_snapshot.engine.grpc_url)
-        .await
-    {
+    let model_name = {
+        let guard = active_model.0.lock().map_err(|e| e.to_string())?;
+        guard.clone()
+    };
+    let Some(model_name) = model_name else {
+        let _ = on_event.send(StreamChunk::Error(no_model_selected_error()));
+        return Ok(());
+    };
+
+    let cancel_token = CancellationToken::new();
+    generation.set_token(cancel_token.clone());
+
+    if config_snapshot.engine.mode == DEFAULT_ENGINE_MODE && !engine_supervisor.is_running() {
+        if should_fallback_to_ollama(&config_snapshot) {
+            generation.clear_token();
+            return ask_ollama(
+                message,
+                quoted_text,
+                image_paths,
+                think,
+                on_event,
+                client,
+                generation,
+                history,
+                config,
+                active_model,
+                capabilities_cache,
+            )
+            .await;
+        }
+        let _ = on_event.send(StreamChunk::Error(OllamaError {
+            kind: OllamaErrorKind::Other,
+            message: "Engine unavailable\nrag-engine is not running.".to_string(),
+        }));
+        generation.clear_token();
+        return Ok(());
+    }
+
+    let preflight = tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => {
+            let _ = on_event.send(StreamChunk::Cancelled);
+            generation.clear_token();
+            return Ok(());
+        }
+        result = engine_client.get_status(&config_snapshot.engine.grpc_url) => result,
+    };
+
+    if let Err(err) = preflight {
         eprintln!("thuki: [rag-engine] preflight failed: {err}");
         if should_fallback_to_ollama(&config_snapshot) {
+            generation.clear_token();
             return ask_ollama(
                 message,
                 quoted_text,
@@ -564,20 +618,9 @@ pub async fn ask_ai(
             kind: OllamaErrorKind::Other,
             message: "Engine unavailable\nrag-engine is not reachable.".to_string(),
         }));
+        generation.clear_token();
         return Ok(());
     }
-
-    let model_name = {
-        let guard = active_model.0.lock().map_err(|e| e.to_string())?;
-        guard.clone()
-    };
-    let Some(model_name) = model_name else {
-        let _ = on_event.send(StreamChunk::Error(no_model_selected_error()));
-        return Ok(());
-    };
-
-    let cancel_token = CancellationToken::new();
-    generation.set_token(cancel_token.clone());
 
     let content = match quoted_text {
         Some(ref qt) if !qt.trim().is_empty() => {
@@ -598,14 +641,19 @@ pub async fn ask_ai(
         (epoch, conv.clone())
     };
 
-    let context_sources = match engine_client
-        .search_rag(
+    let context_sources = match tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => {
+            let _ = on_event.send(StreamChunk::Cancelled);
+            generation.clear_token();
+            return Ok(());
+        }
+        result = engine_client.search_rag(
             &config_snapshot.engine.grpc_url,
             &content,
             config_snapshot.engine.context_top_k,
-        )
-        .await
-    {
+        ) => result,
+    } {
         Ok(sources) => sources,
         Err(err) => {
             eprintln!("thuki: [rag-engine] RAG search failed, continuing without context: {err}");
@@ -613,12 +661,19 @@ pub async fn ask_ai(
         }
     };
 
+    if cancel_token.is_cancelled() {
+        let _ = on_event.send(StreamChunk::Cancelled);
+        generation.clear_token();
+        return Ok(());
+    }
+
     if !context_sources.is_empty() {
         let _ = on_event.send(StreamChunk::ContextSources(context_sources.clone()));
     }
 
     let current_with_context = build_augmented_prompt(&content, &context_sources);
     let prompt = build_engine_prompt_from_history(&history_snapshot, &current_with_context);
+    let was_cancelled = AtomicBool::new(false);
     let stream_result = engine_client
         .stream_inference(
             EngineInferenceParams {
@@ -632,7 +687,10 @@ pub async fn ask_ai(
                 let chunk = match event {
                     EngineStreamEvent::Token(token) => StreamChunk::Token(token),
                     EngineStreamEvent::Done => StreamChunk::Done,
-                    EngineStreamEvent::Cancelled => StreamChunk::Cancelled,
+                    EngineStreamEvent::Cancelled => {
+                        was_cancelled.store(true, Ordering::SeqCst);
+                        StreamChunk::Cancelled
+                    }
                 };
                 let _ = on_event.send(chunk);
             },
@@ -652,8 +710,12 @@ pub async fn ask_ai(
     };
 
     let current_epoch = history.epoch.load(Ordering::SeqCst);
-    if current_epoch == epoch_at_start && !accumulated.is_empty() {
+    if current_epoch == epoch_at_start
+        && !accumulated.is_empty()
+        && !was_cancelled.load(Ordering::SeqCst)
+    {
         let assistant_content = sanitize_assistant_content(&accumulated);
+        let session_id = engine_session_id(epoch_at_start);
         {
             let mut conv = history.messages.lock().unwrap();
             conv.push(user_msg.clone());
@@ -666,7 +728,7 @@ pub async fn ask_ai(
         if let Err(err) = engine_client
             .append_session_turns(
                 &config_snapshot.engine.grpc_url,
-                "thuki-overlay",
+                &session_id,
                 &user_msg.content,
                 &assistant_content,
             )

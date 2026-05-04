@@ -20,12 +20,13 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::config::defaults::{
-    DEFAULT_OLLAMA_SHOW_REQUEST_TIMEOUT_SECS, DEFAULT_OLLAMA_TAGS_REQUEST_TIMEOUT_SECS,
-    MAX_MODEL_SLUG_LEN, MAX_OLLAMA_SHOW_BODY_BYTES, MAX_OLLAMA_TAGS_BODY_BYTES,
+    DEFAULT_ENGINE_MODE, DEFAULT_OLLAMA_SHOW_REQUEST_TIMEOUT_SECS,
+    DEFAULT_OLLAMA_TAGS_REQUEST_TIMEOUT_SECS, MAX_MODEL_SLUG_LEN, MAX_OLLAMA_SHOW_BODY_BYTES,
+    MAX_OLLAMA_TAGS_BODY_BYTES,
 };
 use crate::config::AppConfig;
 use crate::database::{get_config, set_config};
-use crate::engine::EngineClient;
+use crate::engine::{EngineClient, EngineModelPreview, EngineSupervisor};
 use crate::history::Database;
 
 /// `app_config` key used to persist the user's selected model slug.
@@ -47,6 +48,10 @@ pub const MODEL_NOT_INSTALLED_ERR_PREFIX: &str = "Model is not installed in Olla
 /// trigger to invent a default.
 #[derive(Default)]
 pub struct ActiveModelState(pub Mutex<Option<String>>);
+
+fn should_probe_engine_models(config: &AppConfig, supervisor: &EngineSupervisor) -> bool {
+    config.engine.enabled && (config.engine.mode != DEFAULT_ENGINE_MODE || supervisor.is_running())
+}
 
 /// Top-level shape of the Ollama `/api/tags` response. Only the `models`
 /// array is consumed; all other fields are ignored.
@@ -246,28 +251,20 @@ async fn fetch_installed_model_names_inner(
 pub async fn get_model_picker_state(
     client: tauri::State<'_, reqwest::Client>,
     engine_client: tauri::State<'_, EngineClient>,
+    engine_supervisor: tauri::State<'_, EngineSupervisor>,
     db: tauri::State<'_, Database>,
     active_model: tauri::State<'_, ActiveModelState>,
     config: tauri::State<'_, parking_lot::RwLock<AppConfig>>,
 ) -> Result<serde_json::Value, String> {
     let config_snapshot = config.read().clone();
-    if config_snapshot.engine.enabled {
+    let can_probe_engine = should_probe_engine_models(&config_snapshot, &engine_supervisor);
+    if can_probe_engine {
         match engine_client
             .list_models(&config_snapshot.engine.grpc_url)
             .await
         {
             Ok(models) => {
-                let installed: Vec<String> = models
-                    .into_iter()
-                    .map(|model| {
-                        if model.id.is_empty() {
-                            model.name
-                        } else {
-                            model.id
-                        }
-                    })
-                    .filter(|model| !model.trim().is_empty())
-                    .collect();
+                let installed = engine_model_names(&models);
                 let resolved = {
                     let conn = db.0.lock().map_err(|e| e.to_string())?;
                     let persisted =
@@ -302,11 +299,21 @@ pub async fn get_model_picker_state(
                     &[],
                     "engine",
                     false,
-                    false,
+                    true,
                 ));
             }
             Err(_) => {}
         }
+    } else if config_snapshot.engine.enabled && !config_snapshot.engine.fallback_to_ollama {
+        let mut guard = active_model.0.lock().map_err(|e| e.to_string())?;
+        *guard = None;
+        return Ok(build_picker_state_payload_with_backend(
+            None,
+            &[],
+            "engine",
+            false,
+            true,
+        ));
     }
 
     let ollama_url = config_snapshot.inference.ollama_url.clone();
@@ -385,6 +392,44 @@ pub fn build_picker_state_payload_with_backend(
     })
 }
 
+pub fn engine_model_names(models: &[EngineModelPreview]) -> Vec<String> {
+    models
+        .iter()
+        .map(|model| {
+            if model.id.is_empty() {
+                model.name.clone()
+            } else {
+                model.id.clone()
+            }
+        })
+        .filter(|model| !model.trim().is_empty())
+        .collect()
+}
+
+pub fn engine_capabilities(models: &[EngineModelPreview]) -> HashMap<String, Capabilities> {
+    models
+        .iter()
+        .filter_map(|model| {
+            let name = if model.id.is_empty() {
+                model.name.as_str()
+            } else {
+                model.id.as_str()
+            };
+            if name.trim().is_empty() {
+                return None;
+            }
+            Some((
+                name.to_string(),
+                Capabilities {
+                    vision: model.vision,
+                    thinking: model.thinking,
+                    max_images: None,
+                },
+            ))
+        })
+        .collect()
+}
+
 /// Persists `model` as the active model after validating its shape and
 /// confirming Ollama still reports it as installed. Rejects uninstalled
 /// slugs with an error that starts with [`MODEL_NOT_INSTALLED_ERR_PREFIX`].
@@ -393,16 +438,47 @@ pub fn build_picker_state_payload_with_backend(
 pub async fn set_active_model(
     model: String,
     client: tauri::State<'_, reqwest::Client>,
+    engine_client: tauri::State<'_, EngineClient>,
+    engine_supervisor: tauri::State<'_, EngineSupervisor>,
     db: tauri::State<'_, Database>,
     active_model: tauri::State<'_, ActiveModelState>,
     config: tauri::State<'_, parking_lot::RwLock<AppConfig>>,
 ) -> Result<(), String> {
     validate_model_slug(&model)?;
 
-    let ollama_url = config.read().inference.ollama_url.clone();
+    let config_snapshot = config.read().clone();
+    let can_probe_engine = should_probe_engine_models(&config_snapshot, &engine_supervisor);
+    if can_probe_engine {
+        match engine_client
+            .list_models(&config_snapshot.engine.grpc_url)
+            .await
+        {
+            Ok(models) => {
+                let installed = engine_model_names(&models);
+                validate_model_installed(&model, &installed)?;
+                persist_active_model(&db, &active_model, model)?;
+                return Ok(());
+            }
+            Err(_) if !config_snapshot.engine.fallback_to_ollama => {
+                return Err(format!("{MODEL_NOT_INSTALLED_ERR_PREFIX}{model}"));
+            }
+            Err(_) => {}
+        }
+    } else if config_snapshot.engine.enabled && !config_snapshot.engine.fallback_to_ollama {
+        return Err(format!("{MODEL_NOT_INSTALLED_ERR_PREFIX}{model}"));
+    }
+
+    let ollama_url = config_snapshot.inference.ollama_url.clone();
     let installed = fetch_installed_model_names(&client, &ollama_url).await?;
     validate_model_installed(&model, &installed)?;
+    persist_active_model(&db, &active_model, model)
+}
 
+fn persist_active_model(
+    db: &Database,
+    active_model: &ActiveModelState,
+    model: String,
+) -> Result<(), String> {
     {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         set_config(&conn, ACTIVE_MODEL_KEY, &model).map_err(|e| e.to_string())?;
@@ -770,10 +846,27 @@ pub struct ModelCapabilitiesCache(pub Mutex<HashMap<String, Capabilities>>);
 #[cfg_attr(not(coverage), tauri::command)]
 pub async fn get_model_capabilities(
     client: tauri::State<'_, reqwest::Client>,
+    engine_client: tauri::State<'_, EngineClient>,
+    engine_supervisor: tauri::State<'_, EngineSupervisor>,
     cache: tauri::State<'_, ModelCapabilitiesCache>,
     config: tauri::State<'_, parking_lot::RwLock<AppConfig>>,
 ) -> Result<HashMap<String, Capabilities>, String> {
-    let base_url = config.read().inference.ollama_url.clone();
+    let config_snapshot = config.read().clone();
+    let can_probe_engine = should_probe_engine_models(&config_snapshot, &engine_supervisor);
+    if can_probe_engine {
+        match engine_client
+            .list_models(&config_snapshot.engine.grpc_url)
+            .await
+        {
+            Ok(models) => return Ok(engine_capabilities(&models)),
+            Err(_) if !config_snapshot.engine.fallback_to_ollama => return Ok(HashMap::new()),
+            Err(_) => {}
+        }
+    } else if config_snapshot.engine.enabled && !config_snapshot.engine.fallback_to_ollama {
+        return Ok(HashMap::new());
+    }
+
+    let base_url = config_snapshot.inference.ollama_url.clone();
     let installed = fetch_installed_model_names(&client, &base_url).await?;
     Ok(reconcile_capabilities(&client, &cache, &base_url, &installed).await)
 }
@@ -898,6 +991,36 @@ mod tests {
         assert_eq!(payload["backend"], serde_json::json!("engine"));
         assert_eq!(payload["backendReachable"], serde_json::Value::Bool(true));
         assert_eq!(payload["ollamaReachable"], serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn engine_model_helpers_use_id_first_and_map_capabilities() {
+        let models = vec![
+            EngineModelPreview {
+                id: "model-a.gguf".to_string(),
+                name: "Model A".to_string(),
+                loaded: true,
+                vision: true,
+                thinking: false,
+            },
+            EngineModelPreview {
+                id: String::new(),
+                name: "fallback-name.gguf".to_string(),
+                loaded: false,
+                vision: false,
+                thinking: true,
+            },
+        ];
+
+        assert_eq!(
+            engine_model_names(&models),
+            vec!["model-a.gguf".to_string(), "fallback-name.gguf".to_string()]
+        );
+        let capabilities = engine_capabilities(&models);
+        assert!(capabilities["model-a.gguf"].vision);
+        assert!(!capabilities["model-a.gguf"].thinking);
+        assert!(!capabilities["fallback-name.gguf"].vision);
+        assert!(capabilities["fallback-name.gguf"].thinking);
     }
 
     // ── resolve_active_model ─────────────────────────────────────────────────

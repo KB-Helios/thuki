@@ -1126,6 +1126,32 @@ fn engine_bounds_reset_to_defaults() {
 }
 
 #[test]
+fn engine_negative_numeric_values_reset_to_defaults_without_corrupting_file() {
+    let dir = fresh_temp_dir();
+    let path = config_path_in(&dir);
+    std::fs::write(
+        &path,
+        "[engine]\nstartup_timeout_s = -1\ncontext_top_k = -2\n",
+    )
+    .unwrap();
+
+    let loaded = load_from_path(&path).unwrap();
+    assert_eq!(
+        loaded.engine.startup_timeout_s,
+        DEFAULT_ENGINE_STARTUP_TIMEOUT_S
+    );
+    assert_eq!(loaded.engine.context_top_k, DEFAULT_ENGINE_CONTEXT_TOP_K);
+    let renamed_exists = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"));
+    assert!(
+        !renamed_exists,
+        "negative fields should not corrupt the whole config"
+    );
+}
+
+#[test]
 fn toml_without_engine_section_deserializes_to_defaults() {
     let dir = fresh_temp_dir();
     let path = config_path_in(&dir);

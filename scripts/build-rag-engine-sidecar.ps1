@@ -17,10 +17,10 @@ if (-not $hostLine) {
 
 $targetTriple = ($hostLine.ToString() -replace "^host:\s*", "").Trim()
 $binaryName = "ai-engine-server-$targetTriple"
-$isWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+$runningOnWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
   [System.Runtime.InteropServices.OSPlatform]::Windows
 )
-if ($isWindows -and -not $binaryName.EndsWith(".exe")) {
+if ($runningOnWindows -and -not $binaryName.EndsWith(".exe")) {
   $binaryName = "$binaryName.exe"
 }
 

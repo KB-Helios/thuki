@@ -3429,11 +3429,12 @@ mod agentic_tests {
                 .collect(),
         ));
         let runtime_config = service_unavailable_runtime_config();
+        let reader_base_url = "http://0.0.0.0:1";
 
         run_agentic(
             &format!("{}/api/chat", ollama.url()),
             &format!("{}/search", searx.url()),
-            "http://127.0.0.1:1",
+            reader_base_url,
             "m",
             &client,
             token,
@@ -4935,7 +4936,7 @@ mod agentic_tests {
     //
     // All reader calls fail with ServiceUnavailable. The warning must appear
     // exactly once in the event stream even though multiple rounds encounter it.
-    // We use a port that refuses connections (127.0.0.1:1) to trigger
+    // We use a non-routable endpoint that reqwest classifies as connect-like to trigger
     // ServiceUnavailable rather than a mock HTTP 503 (which would be Failed,
     // not ServiceUnavailable in the reader client logic).
     #[tokio::test]
@@ -4944,7 +4945,7 @@ mod agentic_tests {
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         // Reader is pointed at a refused port for all rounds.
-        let reader_base_url = "http://127.0.0.1:1";
+        let reader_base_url = "http://0.0.0.0:1";
 
         let searx_server = MockServer::start().await;
         let ollama_server = MockServer::start().await;
@@ -5907,7 +5908,9 @@ mod agentic_tests {
                 body
             );
             let _ = stream.write_all(response.as_bytes()).await;
-            // listener drops here; subsequent connections receive ECONNREFUSED.
+            while let Ok((stream, _)) = listener.accept().await {
+                drop(stream);
+            }
         });
 
         (base_url, handle)

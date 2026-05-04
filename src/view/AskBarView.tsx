@@ -185,8 +185,8 @@ interface AskBarViewProps {
   /**
    * Called when the user clicks the model picker trigger. App.tsx owns the
    * open/close state and renders the ModelPickerPanel as an inline drawer.
-   * In compose mode App.tsx gates this on `ollamaReachable`, so its presence
-   * doubles as the signal that Ollama is reachable: the chip stays visible
+   * In compose mode App.tsx gates this on backend reachability, so its presence
+   * doubles as the signal that the model backend is reachable: the chip stays visible
    * even when there is no active model or zero installed models so the user
    * can recover by opening the picker.
    */

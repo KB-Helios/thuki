@@ -146,6 +146,16 @@ pub const DEFAULT_ENGINE_HTTP_URL: &str = "http://127.0.0.1:8080";
 pub const DEFAULT_ENGINE_STARTUP_TIMEOUT_S: u64 = 30;
 pub const DEFAULT_ENGINE_CONTEXT_TOP_K: u32 = 5;
 pub const DEFAULT_ENGINE_FALLBACK_TO_OLLAMA: bool = true;
+pub const DEFAULT_ENGINE_HOST: &str = "127.0.0.1";
+pub const DEFAULT_ENGINE_HTTP_PORT: u16 = 8080;
+pub const DEFAULT_ENGINE_GRPC_PORT: u16 = 50051;
+pub const DEFAULT_ENGINE_DAEMON_PORT: u16 = 50061;
+pub const DEFAULT_CONTEXT_SERVICE_PORT: u16 = 9191;
+pub const DEFAULT_ENGINE_HISTORY_WINDOW_TURNS: usize = 12;
+pub const DEFAULT_ENGINE_LOCAL_CONTEXT_MAX_SNIPPET_CHARS: usize = 900;
+pub const DEFAULT_ENGINE_RUNTIME_TEMPERATURE: &str = "1.0";
+pub const DEFAULT_ENGINE_RUNTIME_TOP_P: &str = "0.95";
+pub const DEFAULT_ENGINE_RUNTIME_TOP_K: &str = "64";
 
 /// Accepted engine startup timeout range. The lower bound catches accidental
 /// zero-second startups; the upper bound keeps a wedged sidecar from blocking

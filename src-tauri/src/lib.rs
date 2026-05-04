@@ -507,11 +507,14 @@ fn notify_overlay_hidden(generation: tauri::State<crate::commands::GenerationSta
 /// the frontend listener registration.
 #[tauri::command]
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn notify_frontend_ready(app_handle: tauri::AppHandle, _db: tauri::State<history::Database>) {
+fn notify_frontend_ready(app_handle: tauri::AppHandle, db: tauri::State<history::Database>) {
+    #[cfg(not(target_os = "macos"))]
+    let _ = &db;
+
     if LAUNCH_SHOW_PENDING.swap(false, Ordering::SeqCst) {
         #[cfg(target_os = "macos")]
         {
-            if let Ok(conn) = _db.0.lock() {
+            if let Ok(conn) = db.0.lock() {
                 let stage = onboarding::get_stage(&conn)
                     .unwrap_or(onboarding::OnboardingStage::Permissions);
 

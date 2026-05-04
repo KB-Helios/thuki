@@ -11,7 +11,7 @@
 //! of what the user expects. `AppConfig` itself uses `#[derive(Default)]`
 //! because it delegates entirely to each section's own `Default` impl.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::defaults::{
     DEFAULT_ENGINE_CONTEXT_TOP_K, DEFAULT_ENGINE_ENABLED, DEFAULT_ENGINE_FALLBACK_TO_OLLAMA,
@@ -207,11 +207,37 @@ pub struct EngineSection {
     /// HTTP endpoint for diagnostics and readiness only.
     pub http_url: String,
     /// Seconds Thuki waits for the managed sidecar to become ready.
+    #[serde(deserialize_with = "deserialize_engine_startup_timeout_s")]
     pub startup_timeout_s: u64,
     /// Number of local RAG results prepended to normal text chat.
+    #[serde(deserialize_with = "deserialize_engine_context_top_k")]
     pub context_top_k: u32,
     /// Falls back to Ollama when engine startup or routing fails.
     pub fallback_to_ollama: bool,
+}
+
+fn deserialize_engine_startup_timeout_s<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = i64::deserialize(deserializer)?;
+    if raw < 0 {
+        Ok(DEFAULT_ENGINE_STARTUP_TIMEOUT_S)
+    } else {
+        Ok(raw as u64)
+    }
+}
+
+fn deserialize_engine_context_top_k<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = i64::deserialize(deserializer)?;
+    if raw < 0 || raw > u32::MAX as i64 {
+        Ok(DEFAULT_ENGINE_CONTEXT_TOP_K)
+    } else {
+        Ok(raw as u32)
+    }
 }
 
 impl Default for EngineSection {

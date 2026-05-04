@@ -188,7 +188,7 @@ cd thuki
 git submodule update --init --recursive
 bun install
 
-# Optional for local sidecar development/builds
+# Required before packaging the managed sidecar; tests/lint only need the submodule
 bun run engine:build
 
 # Launch in development mode

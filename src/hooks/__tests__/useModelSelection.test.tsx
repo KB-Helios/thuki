@@ -73,7 +73,7 @@ describe('useModelSelection', () => {
     expect(result.current.ollamaReachable).toBe(false);
   });
 
-  it('uses engine backendReachable when the picker is engine-backed', async () => {
+  it('keeps ollamaReachable authoritative when the picker is engine-backed', async () => {
     invoke.mockResolvedValueOnce({
       active: 'local-model.gguf',
       all: ['local-model.gguf'],
@@ -87,7 +87,9 @@ describe('useModelSelection', () => {
 
     expect(result.current.activeModel).toBe('local-model.gguf');
     expect(result.current.availableModels).toEqual(['local-model.gguf']);
-    expect(result.current.ollamaReachable).toBe(false);
+    expect(result.current.ollamaReachable).toBe(true);
+    expect(result.current.modelBackend).toBe('engine');
+    expect(result.current.modelBackendReachable).toBe(false);
   });
 
   it('falls back to ollamaReachable for legacy engine picker payloads', async () => {
@@ -102,6 +104,8 @@ describe('useModelSelection', () => {
     await act(async () => {});
 
     expect(result.current.ollamaReachable).toBe(false);
+    expect(result.current.modelBackend).toBe('engine');
+    expect(result.current.modelBackendReachable).toBe(false);
   });
 
   it('keeps ollamaReachable authoritative for Ollama-backed payloads', async () => {
@@ -117,6 +121,8 @@ describe('useModelSelection', () => {
     await act(async () => {});
 
     expect(result.current.ollamaReachable).toBe(true);
+    expect(result.current.modelBackend).toBe('ollama');
+    expect(result.current.modelBackendReachable).toBe(false);
   });
 
   it('persists a new active model and updates local state', async () => {
